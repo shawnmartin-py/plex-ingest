@@ -3,13 +3,16 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import dagster as dg
+from dagster._core.test_utils import create_run_for_test
 from pytest_mock import MockerFixture
 
 from plex_ingest.defs.resources.partition_json_io_manager import JsonPartitionIOManager
 from plex_ingest.defs.sensors.sync_imdb_id_partitions import (
+    _BACKFILL_SIGNATURE_TAG_KEY,
+    _SENSOR_NAME,
     _delete_partition_files,
+    _in_flight_signatures,
     _missing_stage_assets,
-    compute_desired_ids,
     compute_partition_diff,
     sync_imdb_id_partitions,
 )
@@ -35,34 +38,6 @@ def _write_stage_files(
         stage_dir = base_dir / stage
         stage_dir.mkdir(exist_ok=True)
         (stage_dir / f"{imdb_id}.json").write_text("{}")
-
-
-# --- compute_desired_ids ---
-
-
-def test_compute_desired_ids_returns_everything_when_no_limit() -> None:
-    assert compute_desired_ids({"tt1", "tt2", "tt3"}, limit=None) == {
-        "tt1",
-        "tt2",
-        "tt3",
-    }
-
-
-def test_compute_desired_ids_caps_at_limit() -> None:
-    assert len(compute_desired_ids({"tt1", "tt2", "tt3"}, limit=2)) == 2
-
-
-def test_compute_desired_ids_is_deterministic_across_calls() -> None:
-    ids = {"tt3", "tt1", "tt2"}
-    assert compute_desired_ids(ids, limit=2) == compute_desired_ids(ids, limit=2)
-
-
-def test_compute_desired_ids_picks_lowest_sorted_ids() -> None:
-    assert compute_desired_ids({"tt3", "tt1", "tt2"}, limit=2) == {"tt1", "tt2"}
-
-
-def test_compute_desired_ids_limit_larger_than_available_returns_all() -> None:
-    assert compute_desired_ids({"tt1", "tt2"}, limit=100) == {"tt1", "tt2"}
 
 
 # --- compute_partition_diff ---
@@ -98,17 +73,6 @@ def test_diff_handles_simultaneous_additions_and_removals() -> None:
     )
     assert new_ids == {"tt3"}
     assert removed_ids == {"tt2"}
-
-
-def test_shrinking_the_limit_removes_previously_registered_ids() -> None:
-    # Simulates lowering PLEX_INGEST_PARTITION_LIMIT between sensor ticks.
-    current_ids = {"tt1", "tt2", "tt3"}
-    registered_ids = compute_desired_ids(current_ids, limit=3)
-    new_ids, removed_ids = compute_partition_diff(
-        compute_desired_ids(current_ids, limit=1), registered_ids
-    )
-    assert new_ids == set()
-    assert len(removed_ids) == 2
 
 
 # --- _delete_partition_files ---
@@ -261,6 +225,245 @@ def test_no_changes_requests_nothing_once_fully_materialized(
     assert isinstance(result, dg.SensorResult)
     assert result.run_requests == []
     assert result.dynamic_partitions_requests == []
+
+
+def test_run_requests_carry_a_run_key(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Regression test for the unbounded-queue-growth bug: every RunRequest must
+    carry a run_key so Dagster dedupes repeat requests for the same still-pending
+    partition across ticks, instead of queueing a fresh duplicate run every tick."""
+    _patch_stage_io_managers(mocker, tmp_path)
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001", "tt0002"])
+    context = dg.build_sensor_context(instance=instance)
+    _write_stage_files(tmp_path, "tt0001")
+
+    result = sync_imdb_id_partitions(
+        context, duckdb=_mock_duckdb(mocker, {"tt0001", "tt0002"})
+    )
+
+    assert isinstance(result, dg.SensorResult)
+    run_requests = result.run_requests
+    assert run_requests is not None
+    assert run_requests  # sanity: this scenario does produce requests
+    assert all(r.run_key is not None for r in run_requests)
+
+
+def test_backfill_signature_changes_once_the_missing_asset_set_changes(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Once a partition's missing-asset signature genuinely changes (here: synopsis
+    finishes materializing between ticks), the backfill_signature tag must change
+    too -- that's what _in_flight_signatures keys on, not run_key (which is now
+    minted uniquely every tick regardless -- see _BACKFILL_SIGNATURE_TAG_KEY's
+    module-level comment for why)."""
+    _patch_stage_io_managers(mocker, tmp_path)
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+
+    context = dg.build_sensor_context(instance=instance)
+    first = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(first, dg.SensorResult)
+    first_signature = next(
+        r.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+        for r in (first.run_requests or [])
+        if r.partition_key == "tt0001"
+    )
+
+    _write_stage_files(tmp_path, "tt0001", stages=("synopsis",))
+    context = dg.build_sensor_context(instance=instance)
+    second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(second, dg.SensorResult)
+    second_signature = next(
+        r.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+        for r in (second.run_requests or [])
+        if r.partition_key == "tt0001"
+    )
+
+    assert first_signature != second_signature
+
+
+def test_no_duplicate_backfill_while_one_is_in_flight(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """The actual duplicate-prevention guarantee now: a second tick must not
+    re-request a partition whose prior request is still non-terminal (queued/
+    started/etc.) -- replacing reliance on Dagster's own run_key dedup, which
+    turned out to also silently block legitimate retries after a failure (see
+    test_backfill_is_retried_after_a_terminal_failure)."""
+    _patch_stage_io_managers(mocker, tmp_path)
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+
+    context = dg.build_sensor_context(instance=instance)
+    first = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(first, dg.SensorResult)
+    backfill = next(
+        r for r in (first.run_requests or []) if r.partition_key == "tt0001"
+    )
+    signature = backfill.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.STARTED,
+        tags={
+            "dagster/sensor_name": _SENSOR_NAME,
+            _BACKFILL_SIGNATURE_TAG_KEY: signature,
+        },
+    )
+
+    context = dg.build_sensor_context(instance=instance)
+    second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(second, dg.SensorResult)
+    # tt0001 itself must not be re-requested; a qdrant rebuild request is still fine
+    # here (tt0001's still-missing embeddings independently trigger that need, and
+    # this specific qdrant signature was never itself put in flight).
+    assert all(r.partition_key != "tt0001" for r in (second.run_requests or []))
+
+
+def test_backfill_is_retried_after_a_terminal_failure(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """The core motivating fix: a partition whose prior attempt FAILED must still be
+    retried. Dagster's own run_key dedup can't distinguish "failed" from "already
+    successfully handled" -- confirmed in production 2026-07-06, where exactly this
+    silently stranded a partition until it was manually relaunched (see CLAUDE.md's
+    "Environment gotchas")."""
+    _patch_stage_io_managers(mocker, tmp_path)
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+
+    context = dg.build_sensor_context(instance=instance)
+    first = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(first, dg.SensorResult)
+    backfill = next(
+        r for r in (first.run_requests or []) if r.partition_key == "tt0001"
+    )
+    signature = backfill.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.FAILURE,
+        tags={
+            "dagster/sensor_name": _SENSOR_NAME,
+            _BACKFILL_SIGNATURE_TAG_KEY: signature,
+        },
+    )
+
+    context = dg.build_sensor_context(instance=instance)
+    second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(second, dg.SensorResult)
+    retried = next(
+        r for r in (second.run_requests or []) if r.partition_key == "tt0001"
+    )
+    assert retried.tags[_BACKFILL_SIGNATURE_TAG_KEY] == signature
+    assert retried.run_key != backfill.run_key
+
+
+def test_qdrant_rebuild_not_duplicated_while_in_flight(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    _patch_stage_io_managers(mocker, tmp_path)
+    _write_stage_files(tmp_path, "tt0001")
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001", "tt0002"])
+
+    context = dg.build_sensor_context(instance=instance)
+    first = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(first, dg.SensorResult)
+    rebuild = next(r for r in (first.run_requests or []) if r.partition_key is None)
+    signature = rebuild.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.STARTED,
+        tags={
+            "dagster/sensor_name": _SENSOR_NAME,
+            _BACKFILL_SIGNATURE_TAG_KEY: signature,
+        },
+    )
+
+    context = dg.build_sensor_context(instance=instance)
+    second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(second, dg.SensorResult)
+    assert all(r.partition_key is not None for r in (second.run_requests or []))
+
+
+def test_qdrant_rebuild_retried_after_a_terminal_failure(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    _patch_stage_io_managers(mocker, tmp_path)
+    _write_stage_files(tmp_path, "tt0001")
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001", "tt0002"])
+
+    context = dg.build_sensor_context(instance=instance)
+    first = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(first, dg.SensorResult)
+    rebuild = next(r for r in (first.run_requests or []) if r.partition_key is None)
+    signature = rebuild.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.FAILURE,
+        tags={
+            "dagster/sensor_name": _SENSOR_NAME,
+            _BACKFILL_SIGNATURE_TAG_KEY: signature,
+        },
+    )
+
+    context = dg.build_sensor_context(instance=instance)
+    second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
+    assert isinstance(second, dg.SensorResult)
+    retried = next(r for r in (second.run_requests or []) if r.partition_key is None)
+    assert retried.tags[_BACKFILL_SIGNATURE_TAG_KEY] == signature
+    assert retried.run_key != rebuild.run_key
+
+
+# --- _in_flight_signatures ---
+
+
+def test_in_flight_signatures_includes_non_terminal_runs() -> None:
+    instance = dg.DagsterInstance.ephemeral()
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.STARTED,
+        tags={
+            "dagster/sensor_name": _SENSOR_NAME,
+            _BACKFILL_SIGNATURE_TAG_KEY: "tt0001:x",
+        },
+    )
+    assert _in_flight_signatures(instance) == {"tt0001:x"}
+
+
+def test_in_flight_signatures_excludes_terminal_runs() -> None:
+    instance = dg.DagsterInstance.ephemeral()
+    for status in (
+        dg.DagsterRunStatus.SUCCESS,
+        dg.DagsterRunStatus.FAILURE,
+        dg.DagsterRunStatus.CANCELED,
+    ):
+        create_run_for_test(
+            instance,
+            status=status,
+            tags={
+                "dagster/sensor_name": _SENSOR_NAME,
+                _BACKFILL_SIGNATURE_TAG_KEY: f"tt0001:{status.value}",
+            },
+        )
+    assert _in_flight_signatures(instance) == set()
+
+
+def test_in_flight_signatures_ignores_runs_from_other_sensors() -> None:
+    instance = dg.DagsterInstance.ephemeral()
+    create_run_for_test(
+        instance,
+        status=dg.DagsterRunStatus.STARTED,
+        tags={
+            "dagster/sensor_name": "some_other_sensor",
+            _BACKFILL_SIGNATURE_TAG_KEY: "tt0001:x",
+        },
+    )
+    assert _in_flight_signatures(instance) == set()
 
 
 def test_previously_registered_partition_missing_files_still_gets_backfilled(

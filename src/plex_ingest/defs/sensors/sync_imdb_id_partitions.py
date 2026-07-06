@@ -1,4 +1,5 @@
-import os
+import hashlib
+import uuid
 
 import dagster as dg
 from dagster_duckdb import DuckDBResource
@@ -10,18 +11,57 @@ from plex_ingest.defs.resources.partition_json_io_manager import (
     SYNOPSIS_IO_MANAGER,
 )
 
-# Deliberate safety rail while this pipeline is being built and tested: caps how many
-# imdb_ids are ever registered as partitions, regardless of how many are in stg_movies.
-# Unset (or remove this check) once the pipeline is proven end to end and covered by
-# tests — see docs/epics/plex-ingest-extraction/phase-2-pipeline-design.md in plex-rag.
-PLEX_INGEST_PARTITION_LIMIT = os.environ.get("PLEX_INGEST_PARTITION_LIMIT")
-
 _STAGE_IO_MANAGERS = (SYNOPSIS_IO_MANAGER, ENRICHMENT_IO_MANAGER, EMBEDDINGS_IO_MANAGER)
 _STAGE_ASSET_KEYS = (
     dg.AssetKey("synopsis"),
     dg.AssetKey("enrichment"),
     dg.AssetKey("embeddings"),
 )
+
+_SENSOR_NAME = "sync_imdb_id_partitions"
+
+# A custom tag carrying the *logical* identity of a backfill request (partition +
+# missing-asset signature, or the qdrant rebuild's own signature) -- deliberately
+# separate from Dagster's `run_key`. Dagster's RunRequest.run_key dedup is permanent
+# and status-agnostic: once a run with a given key exists, Dagster will never launch
+# another one with that key again, even if that run FAILED. Relying on it here would
+# mean any run failure (a crash, a killed daemon, a hard-failed daily quota) silently
+# and permanently strands that partition, since its missing-asset state never changes
+# on its own -- confirmed in production 2026-07-06. So `run_key` below is minted
+# uniquely every tick (just enough to satisfy Dagster's API), and actual duplicate
+# prevention is done ourselves via `_in_flight_signatures`, which only considers
+# *non-terminal* runs -- a terminal FAILURE is invisible to it and can't block a
+# future legitimate attempt.
+_BACKFILL_SIGNATURE_TAG_KEY = "plex_ingest/backfill_signature"
+
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        dg.DagsterRunStatus.SUCCESS,
+        dg.DagsterRunStatus.FAILURE,
+        dg.DagsterRunStatus.CANCELED,
+    }
+)
+_NON_TERMINAL_RUN_STATUSES = [
+    status for status in dg.DagsterRunStatus if status not in _TERMINAL_RUN_STATUSES
+]
+
+
+def _in_flight_signatures(instance: dg.DagsterInstance) -> set[str]:
+    """The `_BACKFILL_SIGNATURE_TAG_KEY` values that already have a non-terminal run
+    in flight for this sensor -- the actual duplicate-prevention check (see the
+    module-level comment above `_BACKFILL_SIGNATURE_TAG_KEY` for why this replaces
+    relying on `run_key` for that purpose)."""
+    records = instance.get_run_records(
+        filters=dg.RunsFilter(
+            tags={"dagster/sensor_name": _SENSOR_NAME},
+            statuses=_NON_TERMINAL_RUN_STATUSES,
+        )
+    )
+    return {
+        r.dagster_run.tags[_BACKFILL_SIGNATURE_TAG_KEY]
+        for r in records
+        if _BACKFILL_SIGNATURE_TAG_KEY in r.dagster_run.tags
+    }
 
 
 def _delete_partition_files(imdb_id: str) -> None:
@@ -46,15 +86,6 @@ def _missing_stage_assets(imdb_id: str) -> list[dg.AssetKey]:
         )
         if not io_manager.path_for(imdb_id).exists()
     ]
-
-
-def compute_desired_ids(current_ids: set[str], limit: int | None) -> set[str]:
-    """The imdb_ids that should be registered as partitions, given what's currently in
-    stg_movies and an optional dev-only cap. Sorted before truncating so the same subset
-    is chosen deterministically across runs, rather than an arbitrary set ordering."""
-    if limit is None:
-        return current_ids
-    return set(sorted(current_ids)[:limit])
 
 
 def compute_partition_diff(
@@ -91,18 +122,15 @@ def sync_imdb_id_partitions(
     partition's embeddings needed backfilling: both are invisible or unreliable for
     qdrant_collection's own eager() condition to react to on its own (file deletion
     isn't tracked at all; a cold-started embeddings materialization is exactly the same
-    missing()-cursor pitfall this sensor exists to avoid)."""
+    missing()-cursor pitfall this sensor exists to avoid). Duplicate-request
+    prevention is done via `_in_flight_signatures`, not Dagster's own `run_key`
+    dedup — see the comment above `_BACKFILL_SIGNATURE_TAG_KEY` for why."""
     with duckdb.get_connection() as conn:
         current_ids = {
             row[0] for row in conn.execute("SELECT imdb_id FROM stg_movies").fetchall()
         }
 
-    limit = (
-        int(PLEX_INGEST_PARTITION_LIMIT)
-        if PLEX_INGEST_PARTITION_LIMIT is not None
-        else None
-    )
-    desired_ids = compute_desired_ids(current_ids, limit)
+    desired_ids = current_ids
 
     registered_ids = set(
         imdb_id_partitions.get_partition_keys(dynamic_partitions_store=context.instance)
@@ -130,22 +158,49 @@ def sync_imdb_id_partitions(
             f"(desired total: {len(desired_ids)})"
         )
 
+    # Dedup against duplicate *in-flight* requests only (see _in_flight_signatures) --
+    # not against Dagster's own run_key mechanism, which is permanent and
+    # status-agnostic and would silently starve retries after any run failure.
+    in_flight = _in_flight_signatures(context.instance)
+
     run_requests: list[dg.RunRequest] = []
-    embeddings_backfilled = False
+    embeddings_backfill_ids: set[str] = set()
     for imdb_id in sorted(desired_ids):
         missing_assets = _missing_stage_assets(imdb_id)
         if not missing_assets:
             continue
-        run_requests.append(
-            dg.RunRequest(asset_selection=missing_assets, partition_key=imdb_id)
-        )
         if dg.AssetKey("embeddings") in missing_assets:
-            embeddings_backfilled = True
-
-    if removed_ids or embeddings_backfilled:
+            embeddings_backfill_ids.add(imdb_id)
+        missing_signature = "-".join(sorted(k.to_user_string() for k in missing_assets))
+        backfill_signature = f"{imdb_id}:{missing_signature}"
+        if backfill_signature in in_flight:
+            continue
         run_requests.append(
-            dg.RunRequest(asset_selection=[dg.AssetKey("qdrant_collection")])
+            dg.RunRequest(
+                run_key=f"{backfill_signature}:{uuid.uuid4().hex[:8]}",
+                asset_selection=missing_assets,
+                partition_key=imdb_id,
+                tags={_BACKFILL_SIGNATURE_TAG_KEY: backfill_signature},
+            )
         )
+
+    if removed_ids or embeddings_backfill_ids:
+        # Signature of *why* a qdrant_collection rebuild is needed right now, used
+        # the same way as backfill_signature above (not as run_key).
+        qdrant_signature = (
+            "qdrant:"
+            + hashlib.sha256(
+                f"{sorted(removed_ids)}|{sorted(embeddings_backfill_ids)}".encode()
+            ).hexdigest()[:16]
+        )
+        if qdrant_signature not in in_flight:
+            run_requests.append(
+                dg.RunRequest(
+                    run_key=f"{qdrant_signature}:{uuid.uuid4().hex[:8]}",
+                    asset_selection=[dg.AssetKey("qdrant_collection")],
+                    tags={_BACKFILL_SIGNATURE_TAG_KEY: qdrant_signature},
+                )
+            )
 
     return dg.SensorResult(
         run_requests=run_requests,
