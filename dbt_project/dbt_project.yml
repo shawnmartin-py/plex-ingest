@@ -1,0 +1,14 @@
+---
+name: plex_ingest
+version: "1.0.0"
+config-version: 2
+profile: plex_ingest
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  plex_ingest:
+    staging:
+      +materialized: view

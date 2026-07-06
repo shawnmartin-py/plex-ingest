@@ -1,0 +1,14 @@
+---
+version: 2
+
+models:
+  - name: stg_movies
+    columns:
+      - name: imdb_id
+        data_tests:
+          - not_null
+          - unique
+      - name: rating_key
+        data_tests:
+          - not_null
+          - unique

@@ -1,0 +1,78 @@
+[project]
+name = "plex-ingest"
+description = "Dagster-based data pipeline for plex-rag: Plex sync, scraping, enrichment, and embedding into Qdrant"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+version = "0.1.0"
+dependencies = [
+    "beautifulsoup4>=4.13.0",
+    "dagster==1.13.12",
+    "dagster-dbt>=0.29.12",
+    "dagster-duckdb>=0.29.12",
+    "dbt-duckdb>=1.10.1",
+    "duckdb>=1.5.4",
+    "langchain-google-genai>=4.2.3",
+    "playwright>=1.49.0",
+    "plexapi>=4.18.1",
+    "qdrant-client>=1.18.0",
+    "requests>=2.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "dagster-dg-cli",
+    "dagster-webserver",
+    "pytest>=9.0.3",
+    "pytest-mock>=3.15.1",
+    "types-beautifulsoup4",
+    "types-requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+force-include = { "pyproject.toml" = "pyproject.toml" }
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "plex_ingest"
+registry_modules = [
+    "plex_ingest.components.*",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "S", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # Dagster's own pydantic-compat shim reads __fields__ internally; nothing
+    # in our code touches that attribute directly, so this can't be fixed
+    # here — silence until Dagster updates its internals for Pydantic v3.
+    "ignore:The `__fields__` attribute is deprecated:pydantic.warnings.PydanticDeprecatedSince20:dagster_shared.dagster_model.pydantic_compat_layer",
+    # Dagster's own evaluate_automation_conditions test helper calls
+    # AssetSelection.all(include_sources=True) internally; we don't call it
+    # ourselves, so this is Dagster's beta surface, not ours to fix.
+    "ignore:Parameter `include_sources` of function `AssetSelection.all` is currently in beta:dagster_shared.utils.warnings.BetaWarning:dagster._core.definitions.declarative_automation.automation_condition_tester",
+]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+explicit_package_bases = true
+exclude = [".venv"]
+# Dagster's own ConfigurableResource/MaterializeResult base classes are generic with no
+# type argument in their own documented usage (e.g. `class Foo(ConfigurableResource):`
+# in Dagster's official docs) — disallow_any_generics has no way to be satisfied for
+# code that subclasses them as intended, so it's relaxed project-wide rather than
+# scattering type: ignore[type-arg] across every asset/resource file.
+disallow_any_generics = false

@@ -1,0 +1,11 @@
+---
+version: 2
+
+sources:
+  - name: plex_ingest
+    schema: main
+    tables:
+      - name: raw_movies
+        meta:
+          dagster:
+            asset_key: ["raw_movies"]

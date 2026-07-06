@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv
+
+# IDE
+.idea/
+
+# Dagster local telemetry/state
+.dg/
+.tmp_dagster_home_*/
+
+# Environment variables
+.env
+
+# Local DuckDB data
+/data/
+
+# dbt build artifacts and local state
+dbt_project/target/
+dbt_project/logs/
+dbt_project/dbt_packages/
+dbt_project/.user.yml
+src/plex_ingest/defs/**/.local_defs_state/
+.dagster_home

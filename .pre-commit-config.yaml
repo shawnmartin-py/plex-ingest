@@ -1,0 +1,54 @@
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-json
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff
+        language_version: python3.13
+        args: [--fix]
+      - id: ruff-format
+        language_version: python3.13
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: bash -c 'uv pip install --quiet --python "$(command -v python)" . && exec mypy "$@"' --
+        language: python
+        language_version: python3.13
+        pass_filenames: false
+        args: [.]
+        types: [python]
+        additional_dependencies:
+          # mypy versions newer than 1.9.0 require a pathspec API
+          # (patterns.gitignore) that dbt-core's dependency chain pins below —
+          # installing both into this hook's shared venv (see the `uv pip
+          # install .` in `entry` above) breaks. `mypy<2` still resolved to
+          # 1.20.2, which has the same break, so this is pinned exactly to
+          # the last version confirmed compatible with pathspec 0.12.1.
+          - mypy==1.9.0
+
+  - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
+    rev: 0.2.3
+    hooks:
+      - id: yamlfmt
+        args: [--mapping, '2', --sequence, '4', --offset, '2', --preserve-quotes]
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        # detect-secrets walks the filesystem directly (not git-tracked files
+        # only), so untracked/gitignored cache dirs must be excluded here
+        # explicitly or the baseline balloons with e.g. .mypy_cache noise.
+        args: ['--baseline', '.secrets.baseline', '--exclude-files', '\.venv/|\.mypy_cache/|\.ruff_cache/|dbt_project/target/|dbt_project/logs/|dbt_project/dbt_packages/']
+        exclude: (^|.+/)tests/
