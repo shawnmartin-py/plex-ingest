@@ -18,6 +18,28 @@ MAX_RETRY_DELAY = 120
 
 SECTIONS = ("craft", "meaning", "context")
 
+# Gemini's free-tier RESOURCE_EXHAUSTED errors always report
+# quotaId="GenerateRequestsPerDayPerProjectPerModel-FreeTier" -- confirmed empirically
+# (2026-07-06) even when the real trigger is a burst against the per-*minute* cap, not
+# the day's budget: firing a concurrent burst well under any plausible daily limit
+# still produced this "PerDay"-named quotaId, just with a small quotaValue matching the
+# RPM figure rather than the (much larger) daily one. So quotaId text cannot
+# distinguish "the day's quota is truly gone" from "brief per-minute throttling" --
+# only the numeric quotaValue can, compared against the model's documented RPM
+# ceiling (https://ai.google.dev/gemini-api/docs/rate-limits). Anything at/under that
+# ceiling is a per-minute burst (transient, worth retrying); anything clearly above it
+# is the real daily cap, which won't clear until Google's next reset, so retrying is
+# pointless. Recalibrate this if EnrichmentLLMResource's configured model changes.
+KNOWN_RPM_LIMIT = 15  # gemini-3.1-flash-lite, free tier
+
+
+class DailyQuotaExhaustedError(RuntimeError):
+    """Gemini's free-tier *daily* request quota is exhausted for the enrichment
+    model -- distinct from a transient per-minute burst, which is retried instead.
+    Deliberately not retried: every retry before the next daily reset is guaranteed
+    to fail the same way."""
+
+
 _SAFETY_OFF = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -174,6 +196,48 @@ _PROMPTS = {
 }
 
 
+def _quota_violation(exc: Exception) -> dict[str, Any] | None:
+    """The QuotaFailure violation dict (quotaId/quotaValue/quotaDimensions/...) from a
+    Gemini RESOURCE_EXHAUSTED error, read off the structured `.details` that
+    `google.genai.errors.ClientError` (the `__cause__` langchain wraps) exposes --
+    None if that's unavailable or doesn't contain one, in which case callers should
+    fall back to the existing retry behavior rather than guessing."""
+    cause = exc.__cause__
+    details = getattr(cause, "details", None)
+    if not isinstance(details, dict):
+        return None
+    for detail in details.get("error", {}).get("details", []):
+        if detail.get("@type") == "type.googleapis.com/google.rpc.QuotaFailure":
+            violations = detail.get("violations") or []
+            if violations:
+                return dict(violations[0])
+    return None
+
+
+def _raise_if_daily_quota_exhausted(exc: Exception) -> None:
+    """Raises DailyQuotaExhaustedError if a RESOURCE_EXHAUSTED error is Gemini's daily
+    quota rather than a per-minute burst (see KNOWN_RPM_LIMIT for how we tell). A
+    no-op -- falling through to the existing retry -- if we can't tell, which is the
+    safe default."""
+    violation = _quota_violation(exc)
+    if violation is None:
+        return
+    try:
+        quota_value = int(violation["quotaValue"])
+    except (KeyError, ValueError):
+        return
+    if quota_value <= KNOWN_RPM_LIMIT:
+        return
+    raise DailyQuotaExhaustedError(
+        f"Gemini daily quota exhausted for model "
+        f"{violation.get('quotaDimensions', {}).get('model')!r}: "
+        f"quotaId={violation.get('quotaId')!r}, quotaValue={quota_value} "
+        f"(> the {KNOWN_RPM_LIMIT}/min RPM ceiling, so this is the daily cap, not a "
+        "per-minute burst). Not retrying — this won't clear until Google's next "
+        "daily reset. Switch API key/model, or wait for the reset."
+    ) from exc
+
+
 class GeminiEnrichmentGenerator:
     """Implements the `EnrichmentGenerator` port (see `lib/ports.py`)."""
 
@@ -212,9 +276,11 @@ class GeminiEnrichmentGenerator:
         section: str,
     ) -> str | None:
         """Generate one enrichment section for one movie, with the legacy retry/backoff
-        and content-policy-block handling: on 429/RESOURCE_EXHAUSTED/timeout, retry with
-        exponential backoff; on an empty response with a synopsis present, retry once
-        without the synopsis (it may have triggered a safety block)."""
+        and content-policy-block handling: on a per-minute RESOURCE_EXHAUSTED/timeout,
+        retry with exponential backoff; on the *daily* quota being exhausted, raise
+        DailyQuotaExhaustedError immediately instead (see KNOWN_RPM_LIMIT); on an empty
+        response with a synopsis present, retry once without the synopsis (it may have
+        triggered a safety block)."""
         chain = self._chain(section)
         delay = BASE_RETRY_DELAY
         current_synopsis: str | None = synopsis
@@ -238,14 +304,13 @@ class GeminiEnrichmentGenerator:
                 return result
             except Exception as e:
                 err = str(e)
-                if (
-                    "429" in err
-                    or "RESOURCE_EXHAUSTED" in err
-                    or "timeout" in err.lower()
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    _raise_if_daily_quota_exhausted(e)
+                elif not (
+                    "timeout" in err.lower()
                     or "deadline" in err.lower()
                     or "timed out" in err.lower()
                 ):
-                    time.sleep(delay)
-                    delay = min(delay * 2, MAX_RETRY_DELAY)
-                else:
                     raise
+                time.sleep(delay)
+                delay = min(delay * 2, MAX_RETRY_DELAY)

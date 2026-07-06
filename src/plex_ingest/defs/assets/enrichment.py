@@ -3,6 +3,7 @@ from dagster_duckdb import DuckDBResource
 
 from plex_ingest.defs.partitions import imdb_id_partitions
 from plex_ingest.defs.resources.enrichment_llm import EnrichmentLLMResource
+from plex_ingest.lib.adapters.gemini_enrichment import DailyQuotaExhaustedError
 from plex_ingest.lib.stg_movies_reader import fetch_movie
 
 
@@ -39,15 +40,25 @@ def enrichment(
 
     sections: dict[str, str] = {}
     for section in enrichment_llm.sections:
-        text = enrichment_llm.generate_section(
-            title=movie.title,
-            year=movie.year,
-            genres=movie.genres,
-            imdb_rating=movie.imdb_rating,
-            content_rating=movie.content_rating,
-            synopsis=synopsis,
-            section=section,
-        )
+        try:
+            text = enrichment_llm.generate_section(
+                title=movie.title,
+                year=movie.year,
+                genres=movie.genres,
+                imdb_rating=movie.imdb_rating,
+                content_rating=movie.content_rating,
+                synopsis=synopsis,
+                section=section,
+            )
+        except DailyQuotaExhaustedError:
+            context.log.error(
+                f"{movie.title} ({imdb_id}): Gemini's daily quota is exhausted for "
+                "the enrichment model — halting rather than retrying (see the "
+                "exception below for which quota and its value). This partition "
+                "will not be auto-retried; re-run it manually once the quota resets "
+                "or the API key/model changes."
+            )
+            raise
         if text is not None:
             sections[section] = text
         context.log.info(

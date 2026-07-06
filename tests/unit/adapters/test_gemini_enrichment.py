@@ -1,10 +1,16 @@
-from typing import TypedDict
+from typing import Any, TypedDict
 from unittest.mock import MagicMock
 
 import pytest
 from pytest_mock import MockerFixture
 
-from plex_ingest.lib.adapters.gemini_enrichment import GeminiEnrichmentGenerator
+from plex_ingest.lib.adapters.gemini_enrichment import (
+    KNOWN_RPM_LIMIT,
+    DailyQuotaExhaustedError,
+    GeminiEnrichmentGenerator,
+    _quota_violation,
+    _raise_if_daily_quota_exhausted,
+)
 
 
 class _GenerateSectionKwargs(TypedDict):
@@ -26,6 +32,47 @@ COMMON_KWARGS: _GenerateSectionKwargs = {
     "synopsis": "A great film.",
     "section": "craft",
 }
+
+
+class _FakeClientErrorCause(Exception):
+    """Stands in for google.genai.errors.ClientError's `.details`, which
+    `_quota_violation` reads off `exc.__cause__` -- must itself be an exception since
+    Python requires `__cause__` to derive from BaseException."""
+
+    def __init__(self, details: dict[str, Any]) -> None:
+        super().__init__("fake client error")
+        self.details = details
+
+
+def _quota_exhausted_exception(
+    quota_value: int,
+    *,
+    quota_id: str = "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    model: str = "gemini-3.1-flash-lite",
+) -> Exception:
+    """A RESOURCE_EXHAUSTED error shaped like the real Gemini API response captured
+    in this session's investigation, with a QuotaFailure violation attached to
+    __cause__ the way langchain_google_genai's wrapping does."""
+    exc = Exception("429 RESOURCE_EXHAUSTED")
+    exc.__cause__ = _FakeClientErrorCause(
+        {
+            "error": {
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {
+                                "quotaId": quota_id,
+                                "quotaValue": str(quota_value),
+                                "quotaDimensions": {"model": model},
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    return exc
 
 
 def make_generator_with_chain(
@@ -119,3 +166,76 @@ def test_generate_section_raises_immediately_on_other_errors(
     generator, _ = make_generator_with_chain(mocker, [ValueError("Something broke")])
     with pytest.raises(ValueError, match="Something broke"):
         generator.generate_section(**COMMON_KWARGS)
+
+
+# --- daily quota vs. per-minute burst ---
+
+
+def test_generate_section_raises_daily_quota_exhausted_above_rpm_ceiling(
+    mocker: MockerFixture,
+) -> None:
+    generator, _ = make_generator_with_chain(mocker, [_quota_exhausted_exception(500)])
+    with pytest.raises(DailyQuotaExhaustedError, match="gemini-3.1-flash-lite"):
+        generator.generate_section(**COMMON_KWARGS)
+
+
+def test_generate_section_retries_when_quota_value_at_rpm_ceiling(
+    mocker: MockerFixture,
+) -> None:
+    mock_sleep = mocker.patch("plex_ingest.lib.adapters.gemini_enrichment.time.sleep")
+    generator, _ = make_generator_with_chain(
+        mocker, [_quota_exhausted_exception(KNOWN_RPM_LIMIT), "Success"]
+    )
+    result = generator.generate_section(**COMMON_KWARGS)
+    assert result == "Success"
+    mock_sleep.assert_called_once()
+
+
+def test_generate_section_retries_when_quota_value_below_rpm_ceiling(
+    mocker: MockerFixture,
+) -> None:
+    mock_sleep = mocker.patch("plex_ingest.lib.adapters.gemini_enrichment.time.sleep")
+    generator, _ = make_generator_with_chain(
+        mocker, [_quota_exhausted_exception(10), "Success"]
+    )
+    result = generator.generate_section(**COMMON_KWARGS)
+    assert result == "Success"
+    mock_sleep.assert_called_once()
+
+
+def test_generate_section_retries_when_violation_details_unavailable(
+    mocker: MockerFixture,
+) -> None:
+    """A plain RESOURCE_EXHAUSTED with no __cause__/.details -- e.g. from a
+    differently-shaped client error -- must fall back to retrying rather than
+    erroring out trying to classify it."""
+    mock_sleep = mocker.patch("plex_ingest.lib.adapters.gemini_enrichment.time.sleep")
+    generator, _ = make_generator_with_chain(
+        mocker, [Exception("429 RESOURCE_EXHAUSTED"), "Success"]
+    )
+    result = generator.generate_section(**COMMON_KWARGS)
+    assert result == "Success"
+    mock_sleep.assert_called_once()
+
+
+def test_quota_violation_returns_none_without_a_cause() -> None:
+    assert _quota_violation(Exception("429")) is None
+
+
+def test_quota_violation_extracts_the_first_violation() -> None:
+    exc = _quota_exhausted_exception(42, quota_id="SomeQuotaId", model="a-model")
+    violation = _quota_violation(exc)
+    assert violation == {
+        "quotaId": "SomeQuotaId",
+        "quotaValue": "42",
+        "quotaDimensions": {"model": "a-model"},
+    }
+
+
+def test_raise_if_daily_quota_exhausted_is_a_noop_on_malformed_quota_value() -> None:
+    exc = _quota_exhausted_exception(500)
+    assert isinstance(exc.__cause__, _FakeClientErrorCause)
+    exc.__cause__.details["error"]["details"][0]["violations"][0]["quotaValue"] = (
+        "not-a-number"
+    )
+    _raise_if_daily_quota_exhausted(exc)  # must not raise

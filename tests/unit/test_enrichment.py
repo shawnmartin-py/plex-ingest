@@ -6,6 +6,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.enrichment import enrichment
+from plex_ingest.lib.adapters.gemini_enrichment import DailyQuotaExhaustedError
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
 # content_rating, thumb_url.
@@ -95,4 +96,20 @@ def test_raises_when_no_stg_movies_row(mocker: MockerFixture) -> None:
 
     context = dg.build_asset_context(partition_key="tt9999")
     with pytest.raises(ValueError, match="tt9999"):
+        enrichment(context, "A great film.", mock_llm, mock_duckdb)
+
+
+def test_daily_quota_exhausted_propagates_and_is_logged(
+    mocker: MockerFixture,
+) -> None:
+    """A DailyQuotaExhaustedError from generate_section must halt the asset (not be
+    swallowed/retried at this layer) and must be logged clearly before propagating,
+    so it's visible without needing to dig through a full traceback."""
+    mock_duckdb = _mock_duckdb(mocker, _catalog_row())
+    mock_llm = cast(MagicMock, mocker.MagicMock())
+    mock_llm.sections = ("craft",)
+    mock_llm.generate_section.side_effect = DailyQuotaExhaustedError("quota gone")
+
+    context = dg.build_asset_context(partition_key="tt0001")
+    with pytest.raises(DailyQuotaExhaustedError, match="quota gone"):
         enrichment(context, "A great film.", mock_llm, mock_duckdb)
