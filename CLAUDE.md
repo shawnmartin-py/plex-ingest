@@ -104,13 +104,16 @@ cross-module imports within this package (PEP 561 marker).
   They're instance state, not part of the asset definitions — re-run this
   after ever recreating `DAGSTER_HOME` from scratch. See README's "Getting
   started" for the exact commands.
-- **`PLEX_INGEST_PARTITION_LIMIT` caps the dev/test footprint.** While this
-  pipeline is being proven out, the `sync_imdb_id_partitions` sensor only
-  ever registers this many imdb_ids as partitions, regardless of library
-  size — currently `3`. Don't remove this without confirming the pipeline
-  has been run successfully against the full library and has adequate test
-  coverage first (see `phase-2-pipeline-design.md`'s framing of this as a
-  deliberate, temporary safety rail, not a permanent limitation).
+- **The `PLEX_INGEST_PARTITION_LIMIT` dev-only safety rail was removed on
+  2026-07-06.** It used to cap how many imdb_ids `sync_imdb_id_partitions`
+  would ever register as partitions, regardless of library size (previously
+  `3`). The pipeline has since been confirmed running against the full
+  library, so the env var, the sensor code that read it, and its
+  `compute_desired_ids` helper (and tests) were removed entirely rather than
+  just left unset — `sync_imdb_id_partitions` now always registers every
+  imdb_id in `stg_movies`. If you see `PLEX_INGEST_PARTITION_LIMIT`
+  referenced anywhere (old docs, a stale `.env`), it's dead — the sensor no
+  longer reads it.
 - **`sync_imdb_id_partitions` and `default_automation_condition_sensor` now
   both default to `RUNNING`** (fixed 2026-07-05 — see
   `phase-2-pipeline-design.md`'s "Known gaps found during dev-subset
@@ -125,7 +128,63 @@ cross-module imports within this package (PEP 561 marker).
   than `dg dev`'s own workspace (`plex_ingest.definitions` vs.
   `plex-ingest`) and silently toggle a phantom instigator state the running
   daemon never looks at. Use a `startSensor` GraphQL mutation against the
-  running webserver (or the UI) instead.
+  running webserver (or the UI) instead. **Confirmed in this instance
+  2026-07-06:** exactly this phantom pair existed (0 ticks ever recorded
+  under `plex_ingest.definitions`, vs. hundreds under the real
+  `plex-ingest` identity) — removed via
+  `instance.delete_instigator_state(origin_id, selector_id)` after
+  confirming via tick history that they were inert, not a live duplicate.
+- **A missing `run_key` on sensor `RunRequest`s causes unbounded queue
+  growth, not just duplicate work — but `run_key` itself is the wrong tool
+  for deduping across ticks.** `sync_imdb_id_partitions` re-evaluates
+  missing-asset state every tick (`minimum_interval_seconds=60`). With no
+  `run_key` at all, Dagster can't dedupe a request for a partition whose
+  previous request is still queued behind the throttled
+  `gemini_llm`/`imdb_scrape` concurrency pools, so a fresh duplicate queues
+  on *every* tick — confirmed 2026-07-06: a 28k-run backlog accumulated in
+  ~8.5 hours before this was caught. The first fix (keying `run_key` on a
+  signature of the partition's currently-missing assets) solved that but
+  created a worse problem: Dagster's `run_key` dedup is **permanent and
+  status-agnostic** — once a run with a given key exists, Dagster never
+  launches another one with that key again, even if that run **failed**.
+  Since a stuck partition's missing-asset signature never changes on its
+  own, this silently and permanently stranded any partition whose run
+  failed for *any* reason (a crash, a killed daemon, a hard-failed daily
+  quota) — confirmed 2026-07-06 (a force-killed `dg dev` left
+  `tt28082769` stuck; the sensor ticked ~11 more times with an unchanged
+  signature and never retried it). **Current fix:** `run_key` is now
+  minted uniquely every tick (just enough to satisfy Dagster's API);
+  actual duplicate prevention is done by the sensor itself via
+  `_in_flight_signatures`, which queries `instance.get_run_records(...)`
+  for *non-terminal* runs only (tagged via a custom
+  `plex_ingest/backfill_signature` tag, not `run_key`). A terminal
+  `FAILURE` is invisible to that check and can no longer block a future
+  legitimate attempt. If `QUEUED` run count balloons again, check
+  `instance.get_runs_count(filters=RunsFilter(statuses=[...]))` and
+  `dagster instance concurrency get <pool>` before assuming it's a new bug;
+  if a partition seems permanently stuck despite otherwise-healthy runs,
+  check whether a `FAILURE` run holds its `plex_ingest/backfill_signature`
+  in a *non-terminal* status only — terminal ones should never block it now.
+- **A `FAILURE`-status run can still hold a claimed concurrency-pool
+  slot.** If `dagster instance concurrency get <pool>` shows slots occupied
+  with nothing actually running, don't assume only `STARTED` runs are the
+  cause — check `instance.event_log_storage.get_concurrency_info(<pool>)`
+  for the actual claimed `run_id` and free it directly with
+  `free_concurrency_slots_for_run(run_id)`. Confirmed 2026-07-06 after an
+  abrupt `dg dev` kill left a claim stuck on a run already marked `FAILURE`.
+- **Gemini's free-tier `RESOURCE_EXHAUSTED` errors don't reliably label
+  themselves "daily" vs. "per-minute."** The violation's `quotaId` reads
+  `GenerateRequestsPerDayPerProjectPerModel-FreeTier` even when the real
+  trigger is a brief per-minute burst — confirmed empirically 2026-07-06
+  against a fresh, unused model (small, fluctuating `quotaValue` across
+  repeated bursts, not a stable daily figure). Only the numeric
+  `quotaValue`, compared against the model's documented RPM ceiling,
+  actually distinguishes the two. `gemini_enrichment.py`'s
+  `KNOWN_RPM_LIMIT` / `DailyQuotaExhaustedError` implements this: RPM-scale
+  violations still retry with backoff; genuine daily-cap violations
+  hard-fail immediately instead of retrying forever (previously: silent
+  infinite retries, indistinguishable from a real hang). Recalibrate
+  `KNOWN_RPM_LIMIT` if `EnrichmentLLMResource`'s configured model changes.
 - **`on_missing()`/`eager()` never pick up a partition (or asset) that was
   already missing at `evaluation_id == 0`** — the literal first-ever
   evaluation of a freshly created automation-condition cursor, not

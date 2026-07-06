@@ -27,10 +27,15 @@ and `phase-2-pipeline-design.md` for what's still undecided. So far:
   `phase-2-pipeline-design.md`'s "Idempotency and backfill semantics".
   `synopsis`/`enrichment` carry no `automation_condition` — the
   `sync_imdb_id_partitions` sensor is their sole trigger, based on on-disk
-  file presence (see "Status" below for why). `embeddings` keeps
-  `eager()` for its ordinary steady-state cascade, and embeds the synopsis
-  document *and* every enrichment section (up to 4 per movie), matching
-  `vector-store-contract.md`'s "up to 4 points per imdb_id" exactly.
+  file presence (see CLAUDE.md's "Environment gotchas" for why). `embeddings`
+  keeps `eager()` for its ordinary steady-state cascade, and embeds the
+  synopsis document *and* every enrichment section (up to 4 per movie),
+  matching `vector-store-contract.md`'s "up to 4 points per imdb_id" exactly.
+  `enrichment` hard-fails immediately (not a silent retry loop) if Gemini's
+  *daily* free-tier quota is exhausted, distinguishing it from an ordinary
+  per-minute rate limit that's retried with backoff — see
+  `src/plex_ingest/lib/adapters/gemini_enrichment.py`'s `KNOWN_RPM_LIMIT` /
+  `DailyQuotaExhaustedError` if this needs adjusting for a different model.
 - `qdrant_collection` — final, unpartitioned full delete+reinsert of the
   Qdrant collection from every `data/embeddings/*.json` on disk, attaching
   full catalog metadata and `embedding_type` read fresh from `stg_movies`
@@ -39,48 +44,22 @@ and `phase-2-pipeline-design.md` for what's still undecided. So far:
   partition set in sync with `stg_movies`, including deletion cascade for
   movies no longer in Plex (`src/plex_ingest/defs/sensors/`).
 
-Verified end to end against real Plex/Gemini/Qdrant for the capped dev
-subset (see below) — 4 Qdrant points per movie, correct `embedding_type`/
-`section`/catalog metadata on each, confirmed by direct query. A follow-up
-session exercised new-movie, movie-removed, and prompt-change/force-refetch
-scenarios against the same live stack; the happy path works for all three.
-That session found three automation-reliability gaps — see
-`phase-2-pipeline-design.md`'s "Known gaps found during dev-subset
-verification" in `plex-rag` for full detail. **All three are now fixed:**
-both sensors default to `RUNNING`; a pure removal directly requests a
-`qdrant_collection` rebuild instead of relying on an incidental future
-`embeddings` update; and `on_missing()`'s cold-start gap (confirmed via
-`tests/integration/test_automation_condition_cold_start.py` to be an
-`evaluation_id == 0` issue — a partition already missing at the
-automation-condition cursor's literal first-ever evaluation never becomes
-eligible again) was fixed by removing `automation_condition` from
-`synopsis`/`enrichment` entirely: `sync_imdb_id_partitions` now checks
-on-disk file presence directly every tick and is their sole trigger,
-sidestepping the cursor rather than working around it.
-`embeddings`/`qdrant_collection` keep `eager()` for their ordinary
-steady-state cascade (unaffected by the cold-start bug), with the same
-sensor providing a direct backfill/rebuild request as a supplement for
-their own cold-start case.
+Verified end to end against the real Plex/Gemini/Qdrant stack, including
+new-movie, movie-removed, and prompt-change/force-refetch scenarios, and
+now runs against the full library (no dev-only partition cap). See
+CLAUDE.md's "Environment gotchas" for the automation-reliability quirks
+found along the way (sensor default-status handling, the
+`on_missing()`/`eager()` cold-start gap, `run_key` dedup, Gemini
+daily-quota vs. per-minute-limit handling) — those are operational
+tribal knowledge, not this file's job to duplicate.
 
-**`dg dev`'s sensors should now start themselves** on a fresh
-`DAGSTER_HOME`/code location (both default to `RUNNING` as of 2026-07-05).
-If a `DAGSTER_HOME` predates that fix, it may still have a persisted
-`STOPPED` state — check **Automation → Sensors** in the UI (or a
-`startSensor` GraphQL mutation) for `sync_imdb_id_partitions` and
-`default_automation_condition_sensor` and enable manually if so.
-
-**Currently capped by `PLEX_INGEST_PARTITION_LIMIT`** (see `.env.example`)
-as a deliberate safety rail while this is being built and tested against
-the real Plex/Gemini/Qdrant stack — only that many imdb_ids are ever
-registered as partitions, regardless of library size. Unset it once the
-pipeline has run against the full library and has broader test coverage
-(currently: unit tests for the scraping cascade, retry/backoff, partition
-diff/limit logic, the sensor's missing-file backfill and removal→rebuild
-`RunRequest` behavior, the JSON IOManager, `embeddings`, and
-`qdrant_collection`, plus integration tests for the cold-start mechanism
-and content-freshness of re-materialized `synopsis`/`enrichment` — not yet
-dedicated asset-level unit tests for `synopsis`/`enrichment` themselves,
-e.g. their error-handling paths).
+Test coverage: unit tests for the scraping cascade, retry/backoff,
+partition diff logic, the sensor's missing-file backfill and
+removal→rebuild `RunRequest` behavior, the JSON IOManager, `embeddings`,
+and `qdrant_collection`, plus integration tests for the cold-start
+mechanism and content-freshness of re-materialized `synopsis`/`enrichment`.
+Not yet covered: dedicated asset-level unit tests for `synopsis`/
+`enrichment` themselves (e.g. their error-handling paths).
 
 ## Getting started
 
@@ -129,13 +108,12 @@ uv run dagster instance concurrency set imdb_scrape 2
 |---|---|
 | `QDRANT_URL` | Qdrant server URL, e.g. `http://localhost:6333` |
 | `QDRANT_COLLECTION` | Collection name — must match `plex-rag`'s `QDRANT_COLLECTION` |
-| `GOOGLE_API_KEY` | Gemini API key, used to embed with `gemini-embedding-001` |
+| `GOOGLE_API_KEY` | Gemini API key — used both to embed with `gemini-embedding-001` and to generate enrichment text with the configured LLM (`gemini-3.1-flash-lite` by default) |
 | `PLEXAPI_AUTH_SERVER_BASEURL` | Plex server URL, e.g. `http://192.168.1.x:32400` |
 | `PLEXAPI_AUTH_SERVER_TOKEN` | Plex auth token |
 | `PLEX_MOVIE_LIBRARY` | Plex movie library name, matching the Plex UI |
 | `DUCKDB_PATH` | Absolute path to the local DuckDB file — must be absolute so `dbt` (invoked with a different cwd) and the Python assets resolve to the same file |
 | `DAGSTER_HOME` | Absolute path to a persistent instance directory — dynamic partitions and concurrency pool limits live here, and must survive across separate `dg launch`/sensor invocations, not just one `dg dev` session |
-| `PLEX_INGEST_PARTITION_LIMIT` | Dev-only safety rail: caps how many imdb_ids the partition-sync sensor ever registers. Unset once the pipeline is proven against the full library |
 
 ## Requirements
 
