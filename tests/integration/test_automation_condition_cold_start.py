@@ -1,5 +1,5 @@
 """Investigates "bug #2" from the dev-subset verification session
-(phase-2-pipeline-design.md's "Known gaps... (2026-07-05)", item 2): the claim that
+(docs/pipeline-design.md's "Known gaps... (2026-07-05)", item 2): the claim that
 `on_missing()` has a cold-start blind spot where a partition already missing at some
 critical moment gets permanently stuck.
 

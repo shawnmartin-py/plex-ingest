@@ -5,7 +5,7 @@ Dagster or vendor-SDK coupling. Each `ConfigurableResource` under
 `defs/resources/` holds config only and delegates to a concrete adapter (see
 `lib/adapters/`) implementing the matching port here — that split is what lets
 an adapter be swapped (e.g. the still-open LangChain/LlamaIndex choice in
-phase-2-pipeline-design.md, plex-rag) or faked in tests without touching the
+docs/pipeline-design.md) or faked in tests without touching the
 resource or any asset.
 """
 

@@ -7,18 +7,13 @@ Qdrant vector store. This repo owns all writes to Qdrant; `plex-rag`
 produces. See `README.md` for setup and `docs/vector-store-contract.md` for
 the data contract between the two repos.
 
-This repo is part of the `plex-ingest-extraction` epic tracked in
-`plex-rag` (sibling repo, lives at
-`/Users/shawnmartin/projects/python/plex-project`) —
-`docs/epics/plex-ingest-extraction/breakdown.md` there has the phased
-plan, and `phase-2-pipeline-design.md` has the architectural decisions for
-this phase (partitioning, storage, deletion cascade, automation semantics,
-Qdrant payload shape — all decided; only the LlamaIndex/LangChain
-framework choice is still open).
-
-**Before resuming epic work, check `plex-rag`'s repo root for a
-`HANDOFF-plex-ingest-extraction-*.md` file** — it has current progress and
-concrete next steps in more detail than the epic docs alone.
+This repo was split out of `plex-rag` (sibling repo, lives at
+`/Users/shawnmartin/projects/python/plex-project`) so the pipeline could be
+rebuilt on Dagster independently of the recommender's deploy lifecycle. See
+`docs/pipeline-design.md` for the architectural decisions this pipeline is
+built on (partitioning, storage, deletion cascade, automation semantics,
+Qdrant payload shape — all decided; only the LlamaIndex/LangChain framework
+choice is still open).
 
 ## Engineering standards
 
@@ -49,11 +44,11 @@ while the pipeline is still prototype-stage:
   `lib/` split as the pipeline grows.
 - **Pipeline architecture decisions are joint, not unilateral.** The
   LlamaIndex/LangChain framework choice is still open — see
-  `phase-2-pipeline-design.md` in `plex-rag`. Surface options and a
-  recommendation; the user makes the final call. (Partitioning, storage,
-  deletion cascade, automation semantics, and dbt-for-staging are already
-  decided; Sling and dlt were evaluated and rejected for Plex extraction —
-  see that doc's "Decisions made so far" before re-litigating any of it.)
+  `docs/pipeline-design.md`. Surface options and a recommendation; the user
+  makes the final call. (Partitioning, storage, deletion cascade,
+  automation semantics, and dbt-for-staging are already decided; Sling and
+  dlt were evaluated and rejected for Plex extraction — see that doc's
+  "Other tooling decisions" before re-litigating any of it.)
 - **A contract-compliance gap is a bug to fix, not a design question.**
   `docs/vector-store-contract.md` is the already-agreed source of truth for
   what gets written to Qdrant. If an asset's actual output doesn't match it
@@ -61,8 +56,8 @@ while the pipeline is still prototype-stage:
   directly rather than treating it as something needing a fresh joint
   decision. (This happened once already: `embeddings`/`qdrant_collection`
   initially missed the synopsis-type point and full catalog metadata —
-  see `phase-2-pipeline-design.md`'s "Qdrant payload shape" for what was
-  wrong and how it was fixed.)
+  see `docs/pipeline-design.md`'s "Qdrant payload shape" for what was wrong
+  and how it was fixed.)
 
 ## Pre-commit is enforced, not advisory
 
@@ -116,7 +111,7 @@ cross-module imports within this package (PEP 561 marker).
   longer reads it.
 - **`sync_imdb_id_partitions` and `default_automation_condition_sensor` now
   both default to `RUNNING`** (fixed 2026-07-05 — see
-  `phase-2-pipeline-design.md`'s "Known gaps found during dev-subset
+  `docs/pipeline-design.md`'s "Known gaps found during dev-subset
   verification", gap #1) **on a fresh code location/instance.** A
   `DAGSTER_HOME` created *before* this fix landed may still have a
   persisted `STOPPED` state for either sensor — check **Automation →
@@ -197,7 +192,7 @@ cross-module imports within this package (PEP 561 marker).
   because of this — `sync_imdb_id_partitions` is their sole trigger,
   checking on-disk file presence directly every tick instead of relying on
   the cursor. Don't add `on_missing()`/`eager()` back to either asset
-  without re-reading `phase-2-pipeline-design.md`'s "Known gaps", item 2.
+  without re-reading `docs/pipeline-design.md`'s "Known gaps", item 2.
   `embeddings`/`qdrant_collection` still use `eager()` for their ordinary
   steady-state cascade (unaffected — it reacts to `any_deps_updated`, a
   recurring event, not the one-shot `missing()` transition), with the same

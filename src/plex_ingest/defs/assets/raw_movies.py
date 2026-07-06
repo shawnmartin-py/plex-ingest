@@ -28,9 +28,8 @@ def raw_movies(
 ) -> dg.MaterializeResult:
     """Full overwrite of the Plex movie library into DuckDB on every run. The library is
     small enough (~3s end to end) that a full re-fetch is cheaper and simpler than
-    incremental sync — see docs/epics/plex-ingest-extraction/phase-2-pipeline-design.md
-    in plex-rag for the larger partitioning discussion (this asset is deliberately
-    unpartitioned)."""
+    incremental sync — see docs/pipeline-design.md for the larger partitioning
+    discussion (this asset is deliberately unpartitioned)."""
     rows = plex.fetch_raw_movies()
 
     with duckdb.get_connection() as conn:

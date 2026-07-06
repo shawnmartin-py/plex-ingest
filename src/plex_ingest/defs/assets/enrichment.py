@@ -23,8 +23,8 @@ def enrichment(
     """Craft/meaning/context expert-profile sections for one movie, ported from
     plex-rag's app/services/enrichment.py. Carries no automation_condition, deliberately
     not eager(): a synopsis backfill must never silently re-trigger these paid,
-    rate-limited Gemini calls (see phase-2-pipeline-design.md's "Idempotency and
-    backfill semantics" in plex-rag). `sync_imdb_id_partitions` is the sole trigger for
+    rate-limited Gemini calls (see docs/pipeline-design.md's "Idempotency and
+    backfill semantics"). `sync_imdb_id_partitions` is the sole trigger for
     its first materialization, based on on-disk file presence rather than
     AutomationCondition.on_missing() (see that sensor's docstring for why). synopsis is
     passed in as a parameter dependency, loaded via synopsis_io_manager for this same

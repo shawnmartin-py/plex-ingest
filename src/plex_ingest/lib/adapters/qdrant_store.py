@@ -18,8 +18,8 @@ class QdrantPointStore:
 
     def recreate_collection(self) -> None:
         """Drop the collection if it exists and create it empty. Used by
-        qdrant_collection's full rebuild — see phase-2-pipeline-design.md's "Asset
-        boundary" in plex-rag for why a full delete+reinsert is the deliberate design,
+        qdrant_collection's full rebuild — see docs/pipeline-design.md's "Asset
+        boundary" for why a full delete+reinsert is the deliberate design,
         not incremental per-movie upserts."""
         client = self._client()
         if client.collection_exists(self._collection):

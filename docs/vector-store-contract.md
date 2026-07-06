@@ -3,10 +3,10 @@
 This is the data-level contract between `plex-rag` (the recommender) and
 `plex-ingest` (the data pipeline, Dagster-based, in a separate repo). It is
 the one thing that must stay in sync **manually** across the two repos —
-there is no shared code package enforcing it, by deliberate choice (see the
-epic decision log in `plex-rag`'s
-`docs/epics/plex-ingest-extraction/README.md`). This is the `plex-ingest`
-copy; keep it in sync with the `plex-rag` copy by hand.
+there is no shared code package enforcing it, by deliberate choice (a
+shared package would re-couple two repos with very different stacks for
+very little payoff). This is the `plex-ingest` copy; keep it in sync with
+the `plex-rag` copy by hand.
 
 Nothing in this doc is aspirational — it describes exactly what
 `plex-ingest` writes and what `plex-rag` reads. If you change one side,

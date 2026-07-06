@@ -24,14 +24,14 @@ def qdrant_collection(
     so the simplest correct thing is also the self-correcting one — a movie pruned
     from embeddings/ (see the partition-sync sensor) is absent from the next rebuild
     *whenever a rebuild actually runs*. Gated by eager(): must never be allowed to
-    drift from whatever embeddings/ currently holds. See phase-2-pipeline-design.md's
-    "Asset boundary" in plex-rag.
+    drift from whatever embeddings/ currently holds. See docs/pipeline-design.md's
+    "Asset boundary".
 
     A pure removal (no accompanying addition) has no tracked embeddings update for
     eager() to react to, since the sensor's file deletion is a direct filesystem write,
     invisible to Dagster's materialization tracking — so sync_imdb_id_partitions
     requests a run of this asset directly whenever it removes a partition, rather than
-    relying on eager() alone. See phase-2-pipeline-design.md's "Known gaps found during
+    relying on eager() alone. See docs/pipeline-design.md's "Known gaps found during
     dev-subset verification".
 
     Catalog fields (title/year/rating/genres/thumb_url) and `embedding_type` are read

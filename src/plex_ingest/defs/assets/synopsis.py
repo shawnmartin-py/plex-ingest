@@ -23,7 +23,7 @@ def synopsis(
     trigger for its first materialization, based on on-disk file presence rather than
     AutomationCondition.on_missing() (see that sensor's docstring for why). Never
     re-scraped once materialized once; redo only via explicit backfill (see
-    phase-2-pipeline-design.md in plex-rag)."""
+    docs/pipeline-design.md)."""
     imdb_id = context.partition_key
 
     with duckdb.get_connection() as conn:

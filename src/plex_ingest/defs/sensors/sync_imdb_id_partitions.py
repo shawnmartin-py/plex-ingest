@@ -76,8 +76,8 @@ def _missing_stage_assets(imdb_id: str) -> list[dg.AssetKey]:
     of their own — rather than AutomationCondition.on_missing(), whose
     missing().newly_true() event is a one-shot transient that never re-fires: a
     partition already missing at the automation-condition cursor's very first
-    evaluation (evaluation_id 0) got stuck forever (see phase-2-pipeline-design.md's
-    "Known gaps found during dev-subset verification", item 2, in plex-rag). Checking
+    evaluation (evaluation_id 0) got stuck forever (see docs/pipeline-design.md's
+    "Known gaps found during dev-subset verification", item 2). Checking
     disk state on every tick sidesteps that cursor entirely."""
     return [
         asset_key
@@ -112,8 +112,8 @@ def sync_imdb_id_partitions(
     carry no automation_condition of their own, since AutomationCondition.on_missing()
     (and eager()) cannot be relied on for this: a partition already missing at the
     automation-condition cursor's very first evaluation never becomes "newly missing"
-    again and is stuck forever (see phase-2-pipeline-design.md's "Known gaps found
-    during dev-subset verification", item 2, in plex-rag). A new imdb_id gets a
+    again and is stuck forever (see docs/pipeline-design.md's "Known gaps found
+    during dev-subset verification", item 2). A new imdb_id gets a
     partition added and, like every other desired partition, is checked against on-disk
     state and backfilled directly if anything is missing. An imdb_id no longer in
     stg_movies gets its partition removed *and* its on-disk synopsis/enrichment/

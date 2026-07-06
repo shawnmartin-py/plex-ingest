@@ -7,8 +7,7 @@ import dagster as dg
 
 # One JSON file per partition key (imdb_id), not DuckDB — DuckDB is single-writer and
 # these assets are meant to run with real partition concurrency. See
-# docs/epics/plex-ingest-extraction/phase-2-pipeline-design.md ("Intermediate/temp
-# storage") in plex-rag for the full reasoning.
+# docs/pipeline-design.md ("Intermediate/temp storage") for the full reasoning.
 PLEX_INGEST_DATA_DIR = os.environ.get("PLEX_INGEST_DATA_DIR", "data")
 
 

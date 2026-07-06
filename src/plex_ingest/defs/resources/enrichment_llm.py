@@ -8,7 +8,7 @@ class EnrichmentLLMResource(dg.ConfigurableResource):
     """Config + adapter factory only — prompts, retry/backoff, and the Gemini chain
     live in lib/adapters/gemini_enrichment.py, behind the EnrichmentGenerator port.
     Keeping this thin is what lets a future LangChain/LlamaIndex framework swap (see
-    phase-2-pipeline-design.md in plex-rag) land as a new adapter, not a rewrite of
+    docs/pipeline-design.md) land as a new adapter, not a rewrite of
     this resource or the enrichment asset."""
 
     model: str = "gemini-3.1-flash-lite"

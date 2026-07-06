@@ -31,8 +31,8 @@ def embeddings(
     on_missing(): embedding a text is a single cheap API call, and if this ever went
     stale relative to `synopsis`/`enrichment` (e.g. after an explicit backfill) the
     vector in Qdrant would no longer match the text it represents — a correctness bug,
-    not just staleness. See phase-2-pipeline-design.md's "Idempotency and backfill
-    semantics" in plex-rag. `sync_imdb_id_partitions` also backfills this directly
+    not just staleness. See docs/pipeline-design.md's "Idempotency and backfill
+    semantics". `sync_imdb_id_partitions` also backfills this directly
     whenever it's missing on disk for a desired partition, rather than relying solely
     on eager()'s own missing-asset detection, which shares on_missing()'s cold-start
     blind spot for an asset's own initial materialization (not just its deps) — see
