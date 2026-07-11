@@ -4,6 +4,7 @@ from pathlib import Path
 
 from qdrant_client.models import Distance
 
+from plex_ingest.lib.media_source import StreamingSource, VideoResolution
 from plex_ingest.lib.stg_movies_reader import MovieCatalogRow
 
 # Mirrors docs/vector-store-contract.md. Keep in sync manually with plex-rag's copy.
@@ -41,11 +42,15 @@ def build_catalog_metadata(
     content_rating: str | None,
     genres: list[str],
     thumb_url: str | None,
+    video_resolution: VideoResolution | None,
+    source_platform: StreamingSource | None,
 ) -> dict[str, object]:
     """Matches plex-rag's MediaItem.to_metadata() exactly — see "metadata fields" in
     vector-store-contract.md. `type` is hardcoded to "movie": stg_movies only ever
     carries movies (no `type` column), matching the contract's "currently the only
-    type synced" note."""
+    type synced" note. `video_resolution`/`source_platform` are mutually exclusive
+    (enforced in stg_movies.sql) and serialized as their raw enum value — plain
+    strings on the wire, like every other contract field."""
     return {
         "imdb_id": imdb_id,
         "type": "movie",
@@ -55,6 +60,8 @@ def build_catalog_metadata(
         "content_rating": content_rating,
         "genres": ", ".join(genres),
         "thumb_url": thumb_url,
+        "video_resolution": video_resolution.value if video_resolution else None,
+        "source_platform": source_platform.value if source_platform else None,
     }
 
 
@@ -85,6 +92,8 @@ def build_points(
             movie.content_rating,
             movie.genres,
             movie.thumb_url,
+            movie.video_resolution,
+            movie.source_platform,
         )
 
         documents = json.loads(path.read_text())

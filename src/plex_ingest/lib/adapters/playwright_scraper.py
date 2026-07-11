@@ -4,7 +4,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
@@ -86,7 +86,7 @@ def _fetch_wikipedia(title: str, year: int) -> str | None:
             "format": "json",
             "srlimit": 3,
         }
-        search = requests.get(
+        search = httpx.get(
             WIKIPEDIA_API,
             headers=WIKIPEDIA_HEADERS,
             params=search_params,
@@ -111,7 +111,7 @@ def _fetch_wikipedia(title: str, year: int) -> str | None:
             "explaintext": True,
             "format": "json",
         }
-        extract = requests.get(
+        extract = httpx.get(
             WIKIPEDIA_API,
             headers=WIKIPEDIA_HEADERS,
             params=extract_params,
@@ -128,7 +128,7 @@ def _fetch_wikipedia(title: str, year: int) -> str | None:
         rest = content[plot_start:].strip()
         next_section = rest.find("\n==")
         return rest[:next_section].strip() if next_section > 0 else rest.strip()
-    except (requests.RequestException, KeyError, StopIteration, ValueError):
+    except (httpx.HTTPError, KeyError, StopIteration, ValueError):
         return None
 
 

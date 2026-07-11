@@ -10,11 +10,18 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, thumb_url.
-CatalogRow = tuple[str, str, int, list[str], float, str, str | None]
+# content_rating, thumb_url, video_resolution, source_platform.
+CatalogRow = tuple[
+    str, str, int, list[str], float, str, str | None, str | None, str | None
+]
 
 
-def _catalog_row(imdb_id: str, title: str = "Test Film") -> CatalogRow:
+def _catalog_row(
+    imdb_id: str,
+    title: str = "Test Film",
+    video_resolution: str | None = None,
+    source_platform: str | None = None,
+) -> CatalogRow:
     return (
         imdb_id,
         title,
@@ -23,6 +30,8 @@ def _catalog_row(imdb_id: str, title: str = "Test Film") -> CatalogRow:
         7.5,
         "PG-13",
         "http://example.com/thumb.jpg",
+        video_resolution,
+        source_platform,
     )
 
 
@@ -122,6 +131,70 @@ def test_points_carry_full_catalog_metadata(
     assert metadata["content_rating"] == "PG-13"
     assert metadata["genres"] == "Drama"
     assert metadata["thumb_url"] == "http://example.com/thumb.jpg"
+    assert metadata["video_resolution"] is None
+    assert metadata["source_platform"] is None
+
+
+def test_points_carry_video_resolution_for_a_real_download(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_qdrant.collection = "media_items"
+    mock_qdrant.point_count.return_value = 1
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", video_resolution="4k")])
+
+    qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
+
+    (points,), _ = mock_qdrant.upsert_points.call_args
+    metadata = points[0][3]
+    assert metadata["video_resolution"] == "4k"
+    assert metadata["source_platform"] is None
+
+
+def test_points_carry_source_platform_for_a_streaming_placeholder(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_qdrant.collection = "media_items"
+    mock_qdrant.point_count.return_value = 1
+    mock_duckdb = _mock_duckdb(
+        mocker, [_catalog_row("tt0001", source_platform="Netflix")]
+    )
+
+    qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
+
+    (points,), _ = mock_qdrant.upsert_points.call_args
+    metadata = points[0][3]
+    assert metadata["source_platform"] == "Netflix"
+    assert metadata["video_resolution"] is None
+
+
+def test_unrecognized_video_resolution_raises(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", video_resolution="8k")])
+
+    with pytest.raises(ValueError, match="tt0001"):
+        qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
 
 def test_raises_when_embeddings_file_has_no_matching_catalog_row(

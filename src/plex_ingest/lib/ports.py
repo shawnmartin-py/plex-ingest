@@ -9,11 +9,22 @@ docs/pipeline-design.md) or faked in tests without touching the
 resource or any asset.
 """
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
 class SynopsisScraper(Protocol):
     def fetch_synopsis(self, imdb_id: str, title: str, year: int) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class SynopsisMatchResult:
+    matches: bool
+    reason: str
+
+
+class SynopsisMatchJudge(Protocol):
+    def check(self, *, title: str, year: int, synopsis: str) -> SynopsisMatchResult: ...
 
 
 class EnrichmentGenerator(Protocol):

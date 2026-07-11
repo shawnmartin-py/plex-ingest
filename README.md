@@ -74,6 +74,18 @@ Plex/Gemini/Qdrant stack.
 - `sync_imdb_id_partitions` — sensor keeping the `imdb_id` dynamic
   partition set in sync with `stg_movies`, including a deletion cascade for
   movies no longer in Plex (`src/plex_ingest/defs/sensors/`).
+- `synopsis_matches_movie` — a **data-quality asset check**
+  (`src/plex_ingest/defs/checks/synopsis_match.py`), distinct from the
+  `tests/` code tests, that verifies a scraped synopsis actually describes
+  its movie rather than an unrelated one, using an LLM judge (Groq's
+  `qwen/qwen3-32b`). **Currently disabled** — `sync_imdb_id_partitions`
+  passes `asset_check_keys=[]` on every `RunRequest`, so it never actually
+  runs. A full-catalog verification run showed the judge is unreliable at
+  scale (~85% false-mismatch rate, including contradictory verdicts for the
+  same partition across runs) — the code is left in place, not deleted,
+  pending a judge model with real search/grounding capability. See
+  `docs/pipeline-design.md`'s "Data-quality checks" for the full design,
+  the failure writeup, and what re-enabling this needs.
 
 See CLAUDE.md's "Environment gotchas" for automation-reliability quirks
 found along the way (sensor default-status handling, the
@@ -90,7 +102,39 @@ logic, the sensor's missing-file backfill and removal→rebuild
 themselves, including their error-handling paths (missing `stg_movies` row,
 scraper finding nothing, missing synopsis, daily quota exhaustion).
 Integration tests cover the cold-start mechanism and content-freshness of
-re-materialized `synopsis`/`enrichment`.
+re-materialized `synopsis`/`enrichment`. The `synopsis_matches_movie` check
+and its Groq judge adapter have their own unit tests (verdict parsing,
+excerpt truncation, rate-limit retry/backoff) — those still pass and cover
+the code paths, but don't catch the judge's real-world unreliability (see
+below), which only showed up running against real data at scale.
+
+### Re-verifying every synopsis already on disk
+
+**Currently unreliable — see `docs/pipeline-design.md`'s "Data-quality
+checks" before trusting any output.** A full-catalog run of this script
+showed the Groq/qwen3-32b judge has a ~85% false-mismatch rate and gives
+inconsistent verdicts for the same partition across runs, which is why the
+check is disabled in production (`sync_imdb_id_partitions` passes
+`asset_check_keys=[]`). The script and check code are unchanged and still
+usable for investigation, just not for real data-quality decisions yet.
+
+To (re-)run `synopsis_matches_movie` against every partition already
+scraped, **without re-scraping `synopsis` itself**:
+
+```bash
+uv run python scripts/verify_synopsis_matches.py          # every partition in data/synopsis/
+uv run python scripts/verify_synopsis_matches.py tt0242888 tt0361127  # just these
+```
+
+This is a plain script, not a `dg launch`/backfill — a job selecting only
+`synopsis_matches_movie` (no plain asset) can't currently be bulk-launched
+across partitions in this Dagster version (see `docs/pipeline-design.md`'s
+"Data-quality checks" for the confirmed limitation). The script calls the
+judge directly per partition and records each result as a runless
+asset-check event, so results still appear in the Dagster UI's checks
+history for `synopsis` (Assets → `synopsis` → Checks tab) exactly as if the
+check had run inside a real job. It exits non-zero (and lists the failing
+`imdb_id`s) if anything fails.
 
 ## Getting started
 
@@ -100,7 +144,8 @@ Install dependencies:
 uv sync
 ```
 
-Copy `.env.example` to `.env` and fill in a real `GOOGLE_API_KEY`:
+Copy `.env.example` to `.env` and fill in real `GOOGLE_API_KEY`/`GROQ_API_KEY`
+values:
 
 ```bash
 cp .env.example .env
@@ -132,6 +177,7 @@ in `DAGSTER_HOME`, not code — see "Environment variables" below):
 uv run dagster instance concurrency set gemini_llm 2
 uv run dagster instance concurrency set imdb_scrape 2
 uv run dagster instance concurrency set gemini_embeddings 2
+uv run dagster instance concurrency set groq_synopsis_judge 2
 ```
 
 Or run `make up` / `make pools` for the equivalent shortcuts — see
@@ -181,7 +227,7 @@ plain `dg`/`docker compose`/`dagster` command, they just save retyping:
 | Target | Equivalent to |
 | --- | --- |
 | `make up` | `docker compose up -d` |
-| `make pools` | the three `dagster instance concurrency set` commands |
+| `make pools` | the four `dagster instance concurrency set` commands |
 | `make dev` | `uv run dg dev` |
 | `make seed` | `uv run dg launch --assets raw_movies,stg_movies` |
 
@@ -192,6 +238,7 @@ plain `dg`/`docker compose`/`dagster` command, they just save retyping:
 | `QDRANT_URL` | Qdrant server URL, e.g. `http://localhost:6333` |
 | `QDRANT_COLLECTION` | Collection name — must match `plex-rag`'s `QDRANT_COLLECTION` |
 | `GOOGLE_API_KEY` | Gemini API key — used both to embed with `gemini-embedding-001` and to generate enrichment text with the configured LLM (`gemini-3.1-flash-lite` by default) |
+| `GROQ_API_KEY` | Groq API key — used by the `synopsis_matches_movie` data-quality check (`qwen/qwen3-32b` by default) to verify a scraped synopsis actually describes the movie it's attached to |
 | `PLEXAPI_AUTH_SERVER_BASEURL` | Plex server URL, e.g. `http://192.168.1.x:32400` |
 | `PLEXAPI_AUTH_SERVER_TOKEN` | Plex auth token |
 | `PLEX_MOVIE_LIBRARY` | Plex movie library name, matching the Plex UI |

@@ -179,6 +179,16 @@ def sync_imdb_id_partitions(
             dg.RunRequest(
                 run_key=f"{backfill_signature}:{uuid.uuid4().hex[:8]}",
                 asset_selection=missing_assets,
+                # Explicitly excludes synopsis_matches_movie, which would otherwise
+                # tag along automatically whenever `synopsis` is in asset_selection.
+                # Disabled 2026-07-06: a full-catalog verification run showed the
+                # Groq/qwen3-32b judge is unreliable at scale (~85% false-mismatch
+                # rate against known-correct synopses, including inconsistent
+                # verdicts for the same partition across separate runs) -- see
+                # docs/pipeline-design.md's "Data-quality checks" for the full
+                # writeup. The check's code is left in place; re-enable by removing
+                # this once a search-capable judge model replaces qwen3-32b.
+                asset_check_keys=[],
                 partition_key=imdb_id,
                 tags={_BACKFILL_SIGNATURE_TAG_KEY: backfill_signature},
             )

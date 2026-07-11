@@ -12,3 +12,13 @@ models:
         data_tests:
           - not_null
           - unique
+      - name: video_resolution
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["sd", "480", "576", "720", "1080", "4k"]
+      - name: source_platform
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Netflix", "Disney+"]

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-import requests
+import httpx
 from pytest_mock import MockerFixture
 
 from plex_ingest.lib.adapters.playwright_scraper import _fetch_wikipedia, _titles_match
@@ -56,7 +56,7 @@ def test_titles_match_movie_title_contained_in_wiki_title() -> None:
 def test_fetch_wikipedia_skips_wrong_first_result_and_uses_correct_second(
     mocker: MockerFixture,
 ) -> None:
-    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.requests.get")
+    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.httpx.get")
     mock_get.side_effect = [
         _search_response(mocker, "Avengers: Endgame", "Avengement"),
         _extract_response(mocker, AVENGEMENT_EXTRACT),
@@ -68,7 +68,7 @@ def test_fetch_wikipedia_skips_wrong_first_result_and_uses_correct_second(
 def test_fetch_wikipedia_returns_none_when_no_result_matches(
     mocker: MockerFixture,
 ) -> None:
-    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.requests.get")
+    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.httpx.get")
     mock_get.side_effect = [
         _search_response(mocker, "Avengers: Endgame", "Avengers: Infinity War"),
     ]
@@ -78,7 +78,7 @@ def test_fetch_wikipedia_returns_none_when_no_result_matches(
 def test_fetch_wikipedia_returns_none_when_no_plot_section(
     mocker: MockerFixture,
 ) -> None:
-    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.requests.get")
+    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.httpx.get")
     extract = "Avengement is a 2019 British action film.\n== Cast ==\nScott Adkins"
     mock_get.side_effect = [
         _search_response(mocker, "Avengement"),
@@ -88,7 +88,7 @@ def test_fetch_wikipedia_returns_none_when_no_plot_section(
 
 
 def test_fetch_wikipedia_returns_none_when_search_empty(mocker: MockerFixture) -> None:
-    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.requests.get")
+    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.httpx.get")
     resp = mocker.MagicMock()
     resp.json.return_value = {"query": {"search": []}}
     mock_get.return_value = resp
@@ -98,6 +98,6 @@ def test_fetch_wikipedia_returns_none_when_search_empty(mocker: MockerFixture) -
 def test_fetch_wikipedia_falls_through_on_request_error(mocker: MockerFixture) -> None:
     # A network hiccup must not raise — the cascade needs to move on to the next
     # fallback (IMDB description), not blow up the whole synopsis asset.
-    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.requests.get")
-    mock_get.side_effect = requests.RequestException("boom")
+    mock_get = mocker.patch("plex_ingest.lib.adapters.playwright_scraper.httpx.get")
+    mock_get.side_effect = httpx.HTTPError("boom")
     assert _fetch_wikipedia("Avengement", 2019) is None

@@ -220,6 +220,148 @@ relitigated.
   `section`/catalog fields on each, then against the full ~156-movie
   library.
 
+## Data-quality checks — decided (2026-07-06), then disabled the same day
+
+Distinct from the `tests/` pytest suite (which tests *code*), the pipeline
+needed a way to catch *bad data* — specifically, a scraped synopsis that
+describes the wrong film (a mismatched franchise entry, an unrelated film
+pulled in by the Wikipedia fallback's search step, or a scrape/search-cascade
+failure returning boilerplate instead of a plot) before it reaches
+`enrichment` (a paid, rate-limited Gemini call) or `embeddings`/
+`qdrant_collection` (and therefore the recommender).
+
+Dagster's native mechanism for this is an **asset check**
+(`@dg.asset_check`), not a new asset — `defs/checks/synopsis_match.py`'s
+`synopsis_matches_movie` attaches to `synopsis`, partitioned the same way
+(`imdb_id`). Textual heuristics alone (e.g. checking whether the synopsis
+mentions the movie's own title, the way `playwright_scraper.py`'s
+`_titles_match` guards the Wikipedia page-search step) aren't enough — plot
+summaries rarely restate their own title, so that only catches gross
+failures, not a fluent, on-topic synopsis for the wrong film. Judging actual
+content match needs an LLM.
+
+**Provider: Groq (`qwen/qwen3-32b`), not Gemini** — a deliberate second LLM
+provider, chosen for its free-tier rate limits (RPM 60 / RPD 1000 / TPM 6000
+/ TPD 500000) being cheap and separate from the `gemini_llm` pool enrichment
+already competes for. `lib/adapters/groq_synopsis_judge.py` implements the
+`SynopsisMatchJudge` port (`lib/ports.py`) behind
+`defs/resources/synopsis_judge.py`'s `SynopsisJudgeResource`, same
+port/adapter split as every other external system in this pipeline. Only a
+leading excerpt of the synopsis is sent (`SYNOPSIS_EXCERPT_CHARS = 700`),
+not the full text — enough for the judge to place the plot in the right
+film without paying token cost for the whole thing on every partition.
+
+**Severity: blocking, `AssetCheckSeverity.ERROR`.** `blocking=True` means a
+run that includes `synopsis` and any of its downstream deps (`enrichment`,
+`embeddings`) — which is exactly what `sync_imdb_id_partitions` requests
+together for a cold-start partition — halts those downstream assets if the
+check fails, rather than merely logging a warning. Bad data physically
+cannot reach Qdrant this way; a failed check requires a human to
+investigate (re-scrape, fix the `stg_movies` row, etc.) rather than silently
+degrading recommendation quality later. Pooled at `groq_synopsis_judge`
+(see README's "Getting started" for the `dagster instance concurrency set`
+command), same convention as every other rate-limited external call in this
+pipeline.
+
+**A `synopsis` that's `None`** (the scraper found nothing) passes the check
+trivially without calling the judge — there's nothing to judge, and
+`enrichment` already fails separately on a missing synopsis.
+
+**Gotcha confirmed 2026-07-06: `qwen/qwen3-32b` is a reasoning model** that
+by default prepends a `<think>...</think>` block before its actual answer,
+which broke the MATCH/MISMATCH parser (`_parse_verdict` in
+`groq_synopsis_judge.py`) in a live smoke test against the real API (mocked
+unit tests didn't catch this, since they stub the chain's output directly).
+Fixed by passing `reasoning_format="hidden"` to `ChatGroq`, which drops the
+thinking block server-side — also saves the (billed) reasoning tokens.
+Recalibrate if the configured model ever changes to a non-reasoning one
+(where `reasoning_format` is a no-op) or a provider without this parameter.
+
+**Gotcha confirmed 2026-07-06: a job selecting only checks (no plain asset)
+can't be bulk-launched across partitions in Dagster 1.13.12.** The obvious
+way to (re-)verify every already-scraped `synopsis` partition without
+re-scraping is `dg.AssetSelection.checks_for_assets(synopsis)` in a
+`define_asset_job`, then `dg launch --job ... --partition <id>` per
+partition (or `dagster job backfill --all`). This fails with `CheckError:
+Job has no PartitionsDefinition`, even when `partitions_def=imdb_id_partitions`
+is passed explicitly to `define_asset_job` — confirmed empirically that the
+explicit value doesn't survive `Definitions` resolution
+(`Definitions.get_job_def(...).partitions_def` comes back `None`) when the
+job's selection contains only `AssetCheckKey`s and no plain `AssetKey`s.
+Consistent with `partitions_def` on `@dg.asset_check` being a documented
+Dagster preview feature (`PreviewWarning: ... currently in preview, and may
+have breaking changes in patch version releases`) — this pipeline is
+pinned to an exact Dagster version anyway (see CLAUDE.md), so the practical
+risk is a future *upgrade* needing to re-check this, not anything broken
+in current operation.
+
+**Working alternative: `scripts/verify_synopsis_matches.py`.** Calls the
+judge directly (the same thing the check op does) for every partition under
+`data/synopsis/`, then records each result as a *runless* asset-check event
+via `instance.report_runless_asset_event(AssetCheckEvaluation(...))` — no
+run, no job, no partitions_def resolution involved, and results still show
+up in the Dagster UI's checks history/health for `synopsis` exactly as if
+the check had executed inside a real job. Confirmed working end-to-end
+against the real instance/API. See README's "Testing" section for usage.
+
+### Disabled 2026-07-06: the Groq/qwen3-32b judge is unreliable at scale
+
+Running `scripts/verify_synopsis_matches.py` against the full ~156-movie
+catalog (the first real bulk use of the check) surfaced a critical problem,
+not a data problem:
+
+- **~85% false-mismatch rate.** The overwhelming majority came back FAIL,
+  including extremely well-known films with unquestionably correct
+  IMDB/Wikipedia synopses on disk — *Toy Story 4*, *Glass Onion*, *Alien:
+  Romulus*, *Deadpool & Wolverine*, *Godzilla Minus One*, *Sinners*.
+- **Inconsistent with itself.** `tt0242888` (*The Sleeping Dictionary*) and
+  `tt0361127` (*The Woodsman*) both scored PASS in an earlier ad hoc
+  two-partition test, with reasoning that correctly described their real
+  plots. In the full batch run minutes later, the *same two partitions*
+  came back FAIL, with reasoning describing different, wrong plot elements
+  that matched neither the real film nor the model's own earlier verdict.
+- **Root cause (most likely):** the prompt asks the judge to verify the
+  synopsis against "the film" using the model's own knowledge, rather than
+  judging the text's internal plausibility. `qwen/qwen3-32b`'s training
+  data can't reliably cover recent releases — several failure reasons
+  literally say "no such film exists" or "not a 2025 release" for real,
+  already-released movies — and its recall is inconsistent between calls
+  even for older/famous titles. A "hidden" `<think>` block (see the
+  `reasoning_format="hidden"` gotcha above) may also mean its chain-of-thought
+  isn't fully deterministic at `temperature=0`, unlike a plain
+  (non-reasoning) completion.
+- **Also found, not yet fixed:** the full run crashed partway through on an
+  unhandled `groq.InternalServerError` (503, "over capacity") —
+  `GroqSynopsisJudge.check()`'s retry/backoff only catches
+  `groq.RateLimitError` (429), not this. Left as-is since the judge itself
+  needs replacing regardless.
+
+**Decision: disable the check in production, keep all the code.**
+`sync_imdb_id_partitions` now passes `asset_check_keys=[]` on every
+`RunRequest` (see that sensor's docstring/comment), so `synopsis_matches_movie`
+never actually executes — `synopsis`/`enrichment`/`embeddings` run exactly
+as if the check didn't exist. Nothing under `defs/checks/`,
+`defs/resources/synopsis_judge.py`, or `lib/adapters/groq_synopsis_judge.py`
+was deleted; `scripts/verify_synopsis_matches.py` still works for manual
+spot-checks, you just can't trust its verdicts yet.
+
+**Re-enabling this needs a judge with real search/grounding**, not just a
+bigger static-knowledge model — the fundamental problem is verifying a
+claim against ground truth the model wasn't trained on (recent releases),
+which no amount of prompt tuning against a fixed-knowledge model fully
+fixes. Options to evaluate when this gets revisited: a provider with
+built-in web search/grounding (e.g. Gemini with Google Search grounding),
+or restructuring the check to only judge internal textual consistency
+(genre/era/setting plausibility) rather than real-world fact-matching,
+which sidesteps the knowledge-cutoff problem entirely at the cost of
+catching fewer real mismatches.
+
+**Event log is polluted with these false results.** Both the two-partition
+ad hoc test and the ~135-partition batch run before the crash were recorded
+via `report_runless_asset_event`, so `synopsis`'s check history in the
+Dagster UI currently shows mostly-false FAILs. Not yet cleaned up — do that
+before trusting the UI's check history for anything, or before re-enabling.
+
 ## Known gaps found during dev-subset verification (2026-07-05)
 
 A follow-up session deliberately exercised three operational scenarios
