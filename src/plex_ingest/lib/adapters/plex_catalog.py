@@ -27,7 +27,12 @@ class PlexMovieCatalog:
         streaming-platform placeholder clips (see docs/vector-store-contract.md) —
         they're real `Movie` items with real `Media`/`Part` data, just a much shorter
         `duration_ms` and a `file_path` naming convention staging parses to detect
-        them."""
+        them.
+
+        `view_count` is captured raw (unfiltered) rather than excluding watched movies
+        here — staging applies the unwatched-only business rule, the same split already
+        used for the imdb_id-required rule, so a movie's watched state stays visible for
+        debugging instead of the item silently never appearing anywhere."""
         section = self._server().library.section(self._movie_library)
         synced_at = datetime.now(UTC)
         return [
@@ -40,6 +45,7 @@ class PlexMovieCatalog:
                 "guids": [guid.id for guid in item.guids],
                 "genres": [genre.tag for genre in item.genres],
                 "imdb_rating": item.ratings[0].value if item.ratings else None,
+                "view_count": item.viewCount,
                 "video_resolution": item.media[0].videoResolution
                 if item.media
                 else None,

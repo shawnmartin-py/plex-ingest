@@ -11,6 +11,7 @@ resolved as (
         thumb_url,
         genres,
         imdb_rating,
+        view_count,
         video_resolution,
         synced_at,
         list_filter(guids, g -> g like 'imdb://%')[1] as imdb_guid,
@@ -46,6 +47,11 @@ select
     source_platform,
     synced_at
 from resolved
--- Raw layer keeps every Plex item, including ones with no IMDb guid; staging is
--- where we apply the business rule that imdb_id is required downstream.
+-- Raw layer keeps every Plex item, including watched ones and ones with no IMDb guid;
+-- staging is where we apply the business rules that only unwatched movies and a
+-- resolved imdb_id are required downstream. A movie that gets watched between runs
+-- drops out here, which the existing partition-removal cascade (see
+-- docs/pipeline-design.md, "Deletion / pruning cascade") then prunes from Qdrant same
+-- as any other movie no longer present in Plex.
 where imdb_guid is not null
+    and view_count = 0

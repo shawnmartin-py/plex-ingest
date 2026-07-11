@@ -15,6 +15,7 @@ CREATE OR REPLACE TABLE {TABLE_NAME} (
     guids VARCHAR[],
     genres VARCHAR[],
     imdb_rating DOUBLE,
+    view_count BIGINT NOT NULL,
     video_resolution VARCHAR,
     duration_ms BIGINT,
     file_path VARCHAR,
@@ -22,7 +23,7 @@ CREATE OR REPLACE TABLE {TABLE_NAME} (
 )
 """
 
-_INSERT_SQL = f"INSERT INTO {TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"  # noqa: S608 — TABLE_NAME is a module constant, not user input
+_INSERT_SQL = f"INSERT INTO {TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"  # noqa: S608 — TABLE_NAME is a module constant, not user input
 
 
 @dg.asset(group_name="raw", kinds={"plex", "duckdb"})
@@ -49,6 +50,7 @@ def raw_movies(
                     row["guids"],
                     row["genres"],
                     row["imdb_rating"],
+                    row["view_count"],
                     row["video_resolution"],
                     row["duration_ms"],
                     row["file_path"],

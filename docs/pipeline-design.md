@@ -152,6 +152,28 @@ its stale points in Qdrant indefinitely. **Fix in place:**
 always triggers a rebuild directly rather than depending on an unrelated
 future `embeddings` update.
 
+**Regression, found and fixed 2026-07-11.** The pipeline is meant to only
+ever contain unwatched movies — this was enforced in the legacy
+`plex-rag`/`app/plex.py` (`Plex.get_media_items(..., unwatched=True)`,
+default `True`, never overridden), but the filter was silently dropped in
+the Dagster rewrite: `PlexMovieCatalog.fetch_raw_movies()` called
+`section.search()` with no `unwatched` argument, and neither
+`raw_movies`/`stg_movies` nor any doc here ever mentioned watched status.
+Confirmed via `git log --all -S"viewCount"`/`-S"unwatched"` across both
+repos — zero hits in this repo's history, meaning it wasn't consciously
+redesigned, just never carried over. **Fix in place:** `view_count` is now
+captured raw in `fetch_raw_movies()`/`raw_movies` (unfiltered, same split
+already used for `imdb_id`-required — see the `stg_movies.sql` comment
+below), and `stg_movies.sql` excludes `view_count != 0` in its final
+`where`. This slots directly into the existing removal cascade above: a
+movie that gets watched between runs simply drops out of `stg_movies`,
+which the "no longer in Plex" partition-removal path already treats as a
+removal — no new deletion logic needed. One consequence worth flagging for
+whoever runs this next: the first `raw_movies`/`stg_movies` run after this
+fix will cause every already-ingested-but-now-watched movie to be pruned
+from the live Qdrant collection via that cascade, not just newly-watched
+ones going forward.
+
 ## Intermediate/temp storage — decided (2026-07-05)
 
 **Per-partition flat files, not DuckDB**, for the three partitioned
