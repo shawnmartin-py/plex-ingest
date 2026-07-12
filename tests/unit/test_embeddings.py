@@ -8,9 +8,18 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.embeddings import embeddings
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, thumb_url, video_resolution, source_platform.
+# content_rating, description, thumb_url, video_resolution, source_platform.
 CatalogRow = tuple[
-    str, str, int, list[str], float, str | None, str | None, str | None, str | None
+    str,
+    str,
+    int,
+    list[str],
+    float,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
 ]
 
 
@@ -31,6 +40,7 @@ def _catalog_row(
         genres or ["Drama"],
         imdb_rating,
         "PG-13",
+        None,
         None,
         None,
         None,

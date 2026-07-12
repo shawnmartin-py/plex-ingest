@@ -41,6 +41,7 @@ class PlexMovieCatalog:
                 "title": item.title,
                 "year": item.year,
                 "content_rating": item.contentRating,
+                "description": item.summary,
                 "thumb_url": item.thumbUrl,
                 "guids": [guid.id for guid in item.guids],
                 "genres": [genre.tag for genre in item.genres],

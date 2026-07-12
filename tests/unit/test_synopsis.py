@@ -8,16 +8,25 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.synopsis import synopsis
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, thumb_url, video_resolution, source_platform.
+# content_rating, description, thumb_url, video_resolution, source_platform.
 CatalogRow = tuple[
-    str, str, int, list[str], float, str | None, str | None, str | None, str | None
+    str,
+    str,
+    int,
+    list[str],
+    float,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
 ]
 
 
 def _catalog_row(
     imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
 ) -> CatalogRow:
-    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None)
+    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, None)
 
 
 def _mock_duckdb(mocker: MockerFixture, row: CatalogRow | None) -> MagicMock:

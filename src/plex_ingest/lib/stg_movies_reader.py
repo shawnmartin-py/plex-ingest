@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 _COLUMNS = (
-    "imdb_id, title, year, genres, imdb_rating, content_rating, thumb_url, "
-    "video_resolution, source_platform"
+    "imdb_id, title, year, genres, imdb_rating, content_rating, description, "
+    "thumb_url, video_resolution, source_platform"
 )
 
 
@@ -30,6 +30,7 @@ class MovieCatalogRow:
     genres: list[str]
     imdb_rating: float | None
     content_rating: str | None
+    description: str | None
     thumb_url: str | None
     video_resolution: VideoResolution | None
     source_platform: StreamingSource | None
@@ -42,6 +43,7 @@ def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
         genres,
         imdb_rating,
         content_rating,
+        description,
         thumb_url,
         video_resolution_raw,
         source_platform_raw,
@@ -63,6 +65,7 @@ def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
         genres=genres,
         imdb_rating=imdb_rating,
         content_rating=content_rating,
+        description=description,
         thumb_url=thumb_url,
         video_resolution=video_resolution,
         source_platform=source_platform,

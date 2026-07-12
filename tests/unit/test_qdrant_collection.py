@@ -10,9 +10,9 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, thumb_url, video_resolution, source_platform.
+# content_rating, description, thumb_url, video_resolution, source_platform.
 CatalogRow = tuple[
-    str, str, int, list[str], float, str, str | None, str | None, str | None
+    str, str, int, list[str], float, str, str | None, str | None, str | None, str | None
 ]
 
 
@@ -29,6 +29,7 @@ def _catalog_row(
         ["Drama"],
         7.5,
         "PG-13",
+        "A great film.",
         "http://example.com/thumb.jpg",
         video_resolution,
         source_platform,
@@ -129,6 +130,7 @@ def test_points_carry_full_catalog_metadata(
     assert metadata["year"] == 2020
     assert metadata["imdb_rating"] == 7.5
     assert metadata["content_rating"] == "PG-13"
+    assert metadata["description"] == "A great film."
     assert metadata["genres"] == "Drama"
     assert metadata["thumb_url"] == "http://example.com/thumb.jpg"
     assert metadata["video_resolution"] is None

@@ -70,6 +70,7 @@ is the only cross-repo data dependency.
 | `year` | int | |
 | `imdb_rating` | float | |
 | `content_rating` | string | e.g. `PG-13` |
+| `description` | string \| null | Plex's own short blurb (`Movie.summary`) — a promotional-length, spoiler-free synopsis, distinct from the long scraped `synopsis` in `page_content` below. Display-only: not embedded, not folded into any `page_content`. |
 | `genres` | string | comma-joined, not a list (`", ".join(genres)`) |
 | `thumb_url` | string \| null | Plex-hosted poster URL |
 | `video_resolution` | string \| null | Raw Plex `Media.videoResolution` value (`sd`/`480`/`576`/`720`/`1080`/`4k`). Mutually exclusive with `source_platform` — null whenever `source_platform` is set. |
