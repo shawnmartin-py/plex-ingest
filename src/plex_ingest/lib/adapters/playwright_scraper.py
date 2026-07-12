@@ -9,11 +9,17 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 # Cascade ported from plex-rag's app/synopsis.py + app/browser.py: IMDB plot summary,
-# then Wikipedia's plot section, then IMDB's shorter description, first hit wins.
+# then Wikipedia's plot section, then IMDB's shorter description, first hit wins —
+# except an IMDB synopsis shorter than SHORT_SYNOPSIS_THRESHOLD is a real section, not
+# missing data, but is treated as merely a candidate: Wikipedia's plot is also fetched
+# and whichever is longer is used (some legitimately-present IMDB synopses are just a
+# terse sentence or two, while Wikipedia's plot for the same film can run to 3-4k
+# chars).
 IMDB_PLOTSUMMARY_URL = "https://www.imdb.com/title/{imdb_id}/plotsummary"
 IMDB_TITLE_URL = "https://www.imdb.com/title/{imdb_id}/"
 WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_HEADERS = {"User-Agent": "plex-ingest-synopsis-bot/1.0"}
+SHORT_SYNOPSIS_THRESHOLD = 1000
 
 
 @contextmanager
@@ -63,28 +69,60 @@ def _fetch_imdb_synopsis(page: Page, imdb_id: str) -> str | None:
     return text or None
 
 
+_ROMAN_TO_ARABIC = {
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+}
+
+
+def _normalize_title(s: str) -> str:
+    s = re.sub(r"\([^)]*\)", "", s)  # drop "(film)", "(2019 film)", etc.
+    s = re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
+    # Wikipedia sequel titles often use arabic numerals ("Pusher 3") where our
+    # catalog title uses roman ("Pusher III") — canonicalize both to arabic.
+    return " ".join(_ROMAN_TO_ARABIC.get(word, word) for word in s.split())
+
+
+def _disambiguator_year(wiki_title: str) -> int | None:
+    match = re.search(r"\((\d{4})", wiki_title)
+    return int(match.group(1)) if match else None
+
+
 def _titles_match(movie_title: str, wiki_title: str) -> bool:
-    """Return True if wiki_title plausibly refers to the same film as movie_title."""
+    """Return True if wiki_title refers to the same film as movie_title.
 
-    def _normalize(s: str) -> str:
-        s = re.sub(r"\([^)]*\)", "", s)  # drop "(film)", "(2019 film)", etc.
-        return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
-
-    movie_norm = _normalize(movie_title)
-    wiki_norm = _normalize(wiki_title)
-    return movie_norm in wiki_norm or wiki_norm in movie_norm
+    Exact match only (post-normalization) — substring containment previously let
+    "The Beast" match the unrelated "The Beast Within (2024 film)" and let any
+    same-titled-but-different film through, since the parenthetical disambiguator
+    (which is where the year that would rule out a false match lives) gets
+    stripped before comparison.
+    """
+    return _normalize_title(movie_title) == _normalize_title(wiki_title)
 
 
 def _fetch_wikipedia(title: str, year: int) -> str | None:
     # A Wikipedia hiccup (network error, unexpected response shape) should fall through
     # to the next cascade step, not fail the whole partition — same as legacy behavior.
     try:
+        # `year` comes from stg_movies/Plex metadata, which doesn't always agree with
+        # Wikipedia's disambiguation year (festival vs. wide release, regional premiere
+        # dates, etc.) — baking it into the full-text search can rank the correct page
+        # far outside srlimit (confirmed: a 2-year-off value pushed the right page
+        # entirely out of the top 8 results). Search on title alone and use `year` only
+        # to disambiguate among exact title matches, below.
         search_params: dict[str, str | int] = {
             "action": "query",
             "list": "search",
-            "srsearch": f"{title} {year} film",
+            "srsearch": f"{title} film",
             "format": "json",
-            "srlimit": 3,
+            "srlimit": 5,
         }
         search = httpx.get(
             WIKIPEDIA_API,
@@ -97,12 +135,22 @@ def _fetch_wikipedia(title: str, year: int) -> str | None:
         if not results:
             return None
 
-        page_title = next(
-            (r["title"] for r in results if _titles_match(title, r["title"])),
-            None,
-        )
-        if page_title is None:
+        candidates = [
+            r["title"]
+            for r in results
+            if "(disambiguation)" not in r["title"].lower()
+            and _titles_match(title, r["title"])
+        ]
+        if not candidates:
             return None
+
+        # Among exact title matches, prefer the one whose disambiguator year is
+        # closest to the catalog year (a candidate with no year disambiguator at
+        # all — i.e. an unambiguous title — is treated as a perfect match).
+        page_title = min(
+            candidates,
+            key=lambda t: abs((_disambiguator_year(t) or year) - year),
+        )
 
         extract_params: dict[str, str | bool] = {
             "action": "query",
@@ -158,11 +206,12 @@ class PlaywrightSynopsisScraper:
             page = context.new_page()
 
             synopsis = _fetch_imdb_synopsis(page, imdb_id)
-            if synopsis:
+            if synopsis and len(synopsis) >= SHORT_SYNOPSIS_THRESHOLD:
                 return synopsis
 
-            synopsis = _fetch_wikipedia(title, year)
-            if synopsis:
-                return synopsis
+            wiki_plot = _fetch_wikipedia(title, year)
+            candidates = [c for c in (synopsis, wiki_plot) if c]
+            if candidates:
+                return max(candidates, key=len)
 
             return _fetch_imdb_description(page, imdb_id)
