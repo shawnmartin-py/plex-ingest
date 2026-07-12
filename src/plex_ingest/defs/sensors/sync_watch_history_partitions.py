@@ -14,13 +14,32 @@ _SENSOR_NAME = "sync_watch_history_partitions"
 _BACKFILL_SIGNATURE_TAG_KEY = "plex_ingest/watch_history_backfill_signature"
 
 # Coarser than sync_imdb_id_partitions's 60s: this doesn't need that granularity (see
-# docs/pipeline-design.md's still-open "Scheduling cadence" question -- 300s is a
+# docs/pipeline-design.md's still-open "Scheduling cadence" question -- 120s is a
 # reasonable default pending a real decision there, not a load-bearing choice).
-_MINIMUM_INTERVAL_SECONDS = 300
+_MINIMUM_INTERVAL_SECONDS = 120
 
 
 def _missing_embeddings(imdb_id: str) -> bool:
     return not WATCH_HISTORY_EMBEDDINGS_IO_MANAGER.path_for(imdb_id).exists()
+
+
+def _qdrant_collection_needs_cold_start(instance: dg.DagsterInstance) -> bool:
+    """True until `watch_history_qdrant_collection` has materialized at least once.
+    Deliberately independent of this tick's `backfilled_any` -- that flag is derived
+    from on-disk embeddings state and goes false again the moment an embedding lands,
+    even if the *qdrant* RunRequest that was supposed to consume it failed to submit
+    (e.g. a transient resource-config error). Without this check, that failure
+    silently and permanently strands the cold start: no future tick would see
+    anything "newly missing" to re-trigger it, since eager() can't catch this cold
+    start either (see this sensor's docstring). Checked directly against the
+    materialization event log, not a cursor, for the same reason `_missing_embeddings`
+    checks on-disk state directly."""
+    return (
+        instance.get_latest_materialization_event(
+            dg.AssetKey("watch_history_qdrant_collection")
+        )
+        is None
+    )
 
 
 def compute_new_partition_ids(
@@ -60,13 +79,21 @@ def sync_watch_history_partitions(
     "Watch-history diversity-recommender pipeline".
 
     `watch_history_qdrant_collection` is requested directly whenever anything gets
-    backfilled, the same cold-start gap `sync_imdb_id_partitions` covers for
-    `qdrant_collection`: a freshly-backfilled `watch_history_embeddings` partition is
-    exactly the case `eager()` can't reliably react to on its own. Its own
-    steady-state reaction to a `stg_watch_history`-only change (e.g. a rewatch
-    updating `last_viewed_at` with no new embedding needed) is left to `eager()`,
-    which is the "ordinary steady-state cascade" case already proven to work
-    elsewhere in this pipeline. Duplicate-request prevention uses the shared
+    backfilled *or* it has never materialized (`_qdrant_collection_needs_cold_start`),
+    the same cold-start gap `sync_imdb_id_partitions` covers for `qdrant_collection`: a
+    freshly-backfilled `watch_history_embeddings` partition is exactly the case
+    `eager()` can't reliably react to on its own. The cold-start check is deliberately
+    separate from `backfilled_any` -- confirmed 2026-07-12: an embeddings RunRequest
+    can succeed while the paired qdrant RunRequest in the same tick fails to submit
+    (e.g. a resource-config error), after which `backfilled_any` alone would never be
+    true again for that imdb_id since its embedding already exists on disk, silently
+    and permanently stranding `watch_history_qdrant_collection` at "never
+    materialized" with nothing left to re-trigger it. Its own steady-state reaction to
+    a `stg_watch_history`-only change (e.g. a rewatch updating `last_viewed_at` with no
+    new embedding needed) is left to `eager()`, which is the "ordinary steady-state
+    cascade" case already proven to work elsewhere in this pipeline -- once
+    `watch_history_qdrant_collection` has materialized once, cold-start requests stop
+    and `eager()` takes over. Duplicate-request prevention uses the shared
     `run_dedup.in_flight_signatures`, not Dagster's own `run_key` dedup -- see
     `run_dedup.py`'s module docstring for why."""
     with duckdb.get_connection() as conn:
@@ -111,7 +138,7 @@ def sync_watch_history_partitions(
             )
         )
 
-    if backfilled_any:
+    if backfilled_any or _qdrant_collection_needs_cold_start(context.instance):
         qdrant_signature = "watch_history_qdrant_rebuild"
         if qdrant_signature not in in_flight:
             run_requests.append(

@@ -32,6 +32,14 @@ def _write_embeddings_file(base_dir: Path, imdb_id: str) -> None:
     (base_dir / f"{imdb_id}.json").write_text("{}")
 
 
+def _report_qdrant_collection_materialized(instance: dg.DagsterInstance) -> None:
+    instance.report_runless_asset_event(
+        dg.AssetMaterialization(
+            asset_key=dg.AssetKey("watch_history_qdrant_collection")
+        )
+    )
+
+
 def _mock_duckdb(mocker: MockerFixture, current_ids: set[str]) -> MagicMock:
     mock_duckdb = cast(MagicMock, mocker.MagicMock())
     mock_conn = mock_duckdb.get_connection.return_value.__enter__.return_value
@@ -89,6 +97,7 @@ def test_no_changes_requests_nothing_once_fully_materialized(
     _write_embeddings_file(tmp_path, "tt0001")
     instance = dg.DagsterInstance.ephemeral()
     instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+    _report_qdrant_collection_materialized(instance)
     context = dg.build_sensor_context(instance=instance)
 
     result = sync_watch_history_partitions(
@@ -110,6 +119,7 @@ def test_id_no_longer_in_stg_watch_history_is_not_removed(
     _write_embeddings_file(tmp_path, "tt0001")
     instance = dg.DagsterInstance.ephemeral()
     instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+    _report_qdrant_collection_materialized(instance)
     context = dg.build_sensor_context(instance=instance)
 
     # tt0001 is no longer in stg_watch_history's current window at all.
@@ -270,9 +280,32 @@ def test_qdrant_rebuild_not_duplicated_while_in_flight(
 def test_fully_materialized_partition_does_not_trigger_qdrant_rebuild(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """No backfill needed -> no reason for the sensor itself to request a
-    qdrant_collection rebuild (steady-state reacts via eager() instead, see the
-    sensor's docstring)."""
+    """No backfill needed and watch_history_qdrant_collection already reflects it ->
+    no reason for the sensor itself to request a rebuild (steady-state reacts via
+    eager() instead, see the sensor's docstring)."""
+    _patch_embeddings_io_manager(mocker, tmp_path)
+    _write_embeddings_file(tmp_path, "tt0001")
+    instance = dg.DagsterInstance.ephemeral()
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
+    _report_qdrant_collection_materialized(instance)
+    context = dg.build_sensor_context(instance=instance)
+
+    result = sync_watch_history_partitions(
+        context, duckdb=_mock_duckdb(mocker, {"tt0001"})
+    )
+
+    assert isinstance(result, dg.SensorResult)
+    assert result.run_requests == []
+
+
+def test_qdrant_cold_start_requested_even_with_no_backfill(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Regression test for the 2026-07-12 bug: watch_history_qdrant_collection has
+    never materialized, but every known imdb_id already has an on-disk embedding (e.g.
+    a prior tick's embeddings RunRequest succeeded while its paired qdrant RunRequest
+    failed to submit). backfilled_any is false here, but the cold-start check must
+    still request the rebuild -- otherwise nothing would ever retrigger it."""
     _patch_embeddings_io_manager(mocker, tmp_path)
     _write_embeddings_file(tmp_path, "tt0001")
     instance = dg.DagsterInstance.ephemeral()
@@ -284,4 +317,7 @@ def test_fully_materialized_partition_does_not_trigger_qdrant_rebuild(
     )
 
     assert isinstance(result, dg.SensorResult)
-    assert result.run_requests == []
+    run_requests = result.run_requests
+    assert run_requests is not None
+    rebuild = next(r for r in run_requests if r.partition_key is None)
+    assert rebuild.asset_selection == [dg.AssetKey("watch_history_qdrant_collection")]

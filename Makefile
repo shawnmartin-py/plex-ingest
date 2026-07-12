@@ -1,4 +1,4 @@
-.PHONY: up pools dev seed
+.PHONY: up pools dev seed seed-watch-history
 
 up:
 	docker compose up -d
@@ -14,3 +14,6 @@ dev:
 
 seed:
 	uv run dg launch --assets raw_movies,stg_movies
+
+seed-watch-history:
+	uv run dg launch --assets stg_watch_history

@@ -568,9 +568,8 @@ still open, but nothing is blocked on it.
 ### Still open
 
 - **Scheduling cadence** for `sync_watch_history_partitions` —
-  `minimum_interval_seconds=300` is a placeholder, not a measured
-  decision. Moot until `dg launch` is unblocked (see CLAUDE.md's
-  "Environment gotchas").
+  `minimum_interval_seconds=120` (set 2026-07-12) is still a placeholder,
+  not a measured decision.
 
 ## Frameworks under consideration
 

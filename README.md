@@ -285,11 +285,13 @@ entry point: materialize `stg_watch_history` (not currently included in
 command), confirm `sync_watch_history_partitions` is `RUNNING` in
 Automation → Sensors, and everything downstream
 (`watch_history_embeddings` → `watch_history_qdrant_collection`) follows
-automatically within one sensor tick (≤300s).
+automatically within one sensor tick (≤120s).
 
 ```bash
 uv run dg launch --assets stg_watch_history
 ```
+
+(`make seed-watch-history` runs this too.)
 
 ## Makefile shortcuts
 
@@ -302,6 +304,7 @@ plain `dg`/`docker compose`/`dagster` command, they just save retyping:
 | `make pools` | the four `dagster instance concurrency set` commands |
 | `make dev` | `uv run dg dev` |
 | `make seed` | `uv run dg launch --assets raw_movies,stg_movies` |
+| `make seed-watch-history` | `uv run dg launch --assets stg_watch_history` |
 
 ## Environment variables
 
