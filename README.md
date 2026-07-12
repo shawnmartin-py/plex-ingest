@@ -28,10 +28,21 @@ For every movie in the library, this pipeline:
    doesn't capture. This is what lets the recommender match taste- and
    vibe-based requests, not just plot keywords.
 4. **Embeds both** the synopsis and the enrichment sections and writes them
-   into Qdrant — the single shared artifact this pipeline produces, and the
-   only thing `plex-rag` ever reads. See
-   [docs/vector-store-contract.md](docs/vector-store-contract.md) for the
-   exact payload shape.
+   into Qdrant's `media_items` collection — the shared artifact this
+   pipeline produces, and the only thing `plex-rag`'s main recommender
+   reads. See [docs/vector-store-contract.md](docs/vector-store-contract.md)
+   for the exact payload shape.
+
+A second, separate pipeline (below) feeds `plex-rag`'s diversity
+recommender — a mode that suggests movies farthest from a
+recency-weighted embedding of the user's watch history, rather than
+nearest-neighbor similarity. It resolves Plex watch history to IMDb IDs
+via Plex's Discover API, embeds a short Plex-provided summary per movie
+(tested sufficient — see `docs/pipeline-design.md`), and writes into its
+own `watch_history` Qdrant collection, kept separate from `media_items`
+because it has a different lifecycle (add-only, relevance enforced at
+query time) and a different source (watch history, not the unwatched
+catalog).
 
 Because a personal library changes over time (movies get added or removed),
 the pipeline is built as an incremental Dagster asset graph rather than a
@@ -93,6 +104,46 @@ found along the way (sensor default-status handling, the
 daily-quota handling) — that's operational tribal knowledge, not this
 file's job to duplicate.
 
+### Watch-history pipeline (diversity recommender)
+
+A separate `watch_history` asset group, mirroring the shape of the
+pipeline above but feeding its own Qdrant collection:
+
+- `stg_watch_history` — fetches the last 60 days of Plex watch history and
+  resolves each title to an `imdb_id`/genres/rating/short summary via
+  Plex's Discover API (`src/plex_ingest/defs/assets/stg_watch_history.py`,
+  using `PlexWatchHistoryResource`). Deliberately unpartitioned and
+  upserts into an accumulating DuckDB table rather than overwriting, so a
+  row survives after it ages out of the fetch window. Manual entry point,
+  same as `raw_movies`/`stg_movies`.
+- `watch_history_embeddings` — partitioned by `watch_history_imdb_id`
+  (a separate, add-only partition set from `imdb_id`); embeds one
+  synopsis-shaped document per movie, no synopsis/enrichment split
+  (`src/plex_ingest/defs/assets/watch_history_embeddings.py`). Pooled at
+  the same `gemini_embeddings` limit as `embeddings`.
+- `watch_history_qdrant_collection` — full delete+reinsert of the
+  `watch_history` collection from every cached embedding, filtered to
+  movies watched within a rolling relevance window (default 60 days) at
+  rebuild time — an embedding that ages out of the window is excluded
+  from the rebuild but stays cached on disk in case a rewatch brings it
+  back (`src/plex_ingest/defs/assets/watch_history_qdrant_collection.py`).
+- `sync_watch_history_partitions` — sensor keeping the
+  `watch_history_imdb_id` partition set in sync with `stg_watch_history`
+  and triggering both assets above on cold start
+  (`src/plex_ingest/defs/sensors/sync_watch_history_partitions.py`).
+  **Add-only, unlike `sync_imdb_id_partitions`**: an `imdb_id` already
+  embedded here is never re-embedded or removed just because it later
+  ages out of `stg_watch_history`'s fetch window — a rewatch could bring
+  it back into relevance, so this pipeline guarantees each movie is only
+  ever embedded once.
+
+See `docs/pipeline-design.md`'s "Watch-history diversity-recommender
+pipeline" for the full design rationale, and
+`docs/vector-store-contract.md`'s `watch_history` collection section for
+the payload shape. Not yet exercised via a live sensor tick — see
+CLAUDE.md's "Environment gotchas" for the pre-existing `dg launch`/`dg
+check` issue blocking that, unrelated to this pipeline.
+
 ## Testing
 
 Unit tests cover the scraping cascade, retry/backoff, partition diff
@@ -107,6 +158,15 @@ and its Groq judge adapter have their own unit tests (verdict parsing,
 excerpt truncation, rate-limit retry/backoff) — those still pass and cover
 the code paths, but don't catch the judge's real-world unreliability (see
 below), which only showed up running against real data at scale.
+
+The watch-history pipeline has its own unit tests covering the Plex
+adapter and resource, `stg_watch_history`'s fetch/resolve/upsert logic,
+`sync_watch_history_partitions`'s add-only diffing, `watch_history_embeddings`,
+and `watch_history_qdrant_collection`'s window filtering, plus a shared
+`run_dedup` unit test (the in-flight-signature logic both sensors now use).
+An integration test covers `qdrant_collection`'s widened automation
+condition (waiting for the rest of the pipeline to settle before rebuilding
+mid-backfill — see that asset's docstring).
 
 ### Re-verifying every synopsis already on disk
 
@@ -219,6 +279,18 @@ manual action required once the environment is set up. Ordinary
 steady-state library changes (movies added or removed in Plex) need no
 further manual intervention.
 
+The watch-history pipeline follows the same pattern with its own manual
+entry point: materialize `stg_watch_history` (not currently included in
+`make seed` / the `raw_movies,stg_movies` launch above — a separate
+command), confirm `sync_watch_history_partitions` is `RUNNING` in
+Automation → Sensors, and everything downstream
+(`watch_history_embeddings` → `watch_history_qdrant_collection`) follows
+automatically within one sensor tick (≤300s).
+
+```bash
+uv run dg launch --assets stg_watch_history
+```
+
 ## Makefile shortcuts
 
 Thin wrappers around the commands above — nothing they do isn't also a
@@ -236,7 +308,8 @@ plain `dg`/`docker compose`/`dagster` command, they just save retyping:
 | Variable | Purpose |
 | --- | --- |
 | `QDRANT_URL` | Qdrant server URL, e.g. `http://localhost:6333` |
-| `QDRANT_COLLECTION` | Collection name — must match `plex-rag`'s `QDRANT_COLLECTION` |
+| `QDRANT_COLLECTION` | `media_items` collection name — must match `plex-rag`'s `QDRANT_COLLECTION` |
+| `QDRANT_WATCH_HISTORY_COLLECTION` | `watch_history` collection name — must match `plex-rag`'s equivalent var (see `docs/vector-store-contract.md`) |
 | `GOOGLE_API_KEY` | Gemini API key — used both to embed with `gemini-embedding-001` and to generate enrichment text with the configured LLM (`gemini-3.1-flash-lite` by default) |
 | `GROQ_API_KEY` | Groq API key — used by the `synopsis_matches_movie` data-quality check (`qwen/qwen3-32b` by default) to verify a scraped synopsis actually describes the movie it's attached to |
 | `PLEXAPI_AUTH_SERVER_BASEURL` | Plex server URL, e.g. `http://192.168.1.x:32400` |
