@@ -10,6 +10,7 @@ from plex_ingest.defs.resources.partition_json_io_manager import (
     ENRICHMENT_IO_MANAGER,
     SYNOPSIS_IO_MANAGER,
 )
+from plex_ingest.defs.sensors.run_dedup import in_flight_signatures
 
 _STAGE_IO_MANAGERS = (SYNOPSIS_IO_MANAGER, ENRICHMENT_IO_MANAGER, EMBEDDINGS_IO_MANAGER)
 _STAGE_ASSET_KEYS = (
@@ -34,34 +35,14 @@ _SENSOR_NAME = "sync_imdb_id_partitions"
 # future legitimate attempt.
 _BACKFILL_SIGNATURE_TAG_KEY = "plex_ingest/backfill_signature"
 
-_TERMINAL_RUN_STATUSES = frozenset(
-    {
-        dg.DagsterRunStatus.SUCCESS,
-        dg.DagsterRunStatus.FAILURE,
-        dg.DagsterRunStatus.CANCELED,
-    }
-)
-_NON_TERMINAL_RUN_STATUSES = [
-    status for status in dg.DagsterRunStatus if status not in _TERMINAL_RUN_STATUSES
-]
-
 
 def _in_flight_signatures(instance: dg.DagsterInstance) -> set[str]:
     """The `_BACKFILL_SIGNATURE_TAG_KEY` values that already have a non-terminal run
     in flight for this sensor -- the actual duplicate-prevention check (see the
     module-level comment above `_BACKFILL_SIGNATURE_TAG_KEY` for why this replaces
-    relying on `run_key` for that purpose)."""
-    records = instance.get_run_records(
-        filters=dg.RunsFilter(
-            tags={"dagster/sensor_name": _SENSOR_NAME},
-            statuses=_NON_TERMINAL_RUN_STATUSES,
-        )
-    )
-    return {
-        r.dagster_run.tags[_BACKFILL_SIGNATURE_TAG_KEY]
-        for r in records
-        if _BACKFILL_SIGNATURE_TAG_KEY in r.dagster_run.tags
-    }
+    relying on `run_key` for that purpose). See `run_dedup.py` for the shared
+    implementation (also used by `sync_watch_history_partitions`)."""
+    return in_flight_signatures(instance, _SENSOR_NAME, _BACKFILL_SIGNATURE_TAG_KEY)
 
 
 def _delete_partition_files(imdb_id: str) -> None:

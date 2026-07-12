@@ -29,4 +29,15 @@ class QdrantResource(dg.ConfigurableResource):
         return self._adapter().point_count()
 
 
-defs = dg.Definitions(resources={"qdrant": QdrantResource()})
+defs = dg.Definitions(
+    resources={
+        "qdrant": QdrantResource(),
+        # Same class, second instance/config -- a different collection on the same
+        # Qdrant deployment. See docs/vector-store-contract.md's `watch_history`
+        # collection section.
+        "watch_history_qdrant": QdrantResource(
+            url=dg.EnvVar("QDRANT_URL"),
+            collection=dg.EnvVar("QDRANT_WATCH_HISTORY_COLLECTION"),
+        ),
+    }
+)

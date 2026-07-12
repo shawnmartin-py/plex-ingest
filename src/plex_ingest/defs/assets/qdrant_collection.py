@@ -8,12 +8,35 @@ from plex_ingest.defs.resources.qdrant import QdrantResource
 from plex_ingest.lib.stg_movies_reader import fetch_all_movies
 from plex_ingest.lib.vector_store_contract import build_points
 
+_ONLY_EMBEDDINGS = dg.AssetSelection.assets("embeddings")
+
+# eager(), but broadened past its own `~any_deps_in_progress()` guard: that guard only
+# inspects qdrant_collection's *direct* deps (embeddings), so during a large backfill it
+# still fires a full rebuild after every single embeddings partition, each one stale
+# within moments as more partitions land — a real, not hypothetical, problem, since
+# sync_imdb_id_partitions drives synopsis/enrichment/embeddings across potentially
+# hundreds of imdb_id partitions at very different pipeline stages simultaneously.
+# synopsis/enrichment are added as structural `deps=` purely so any_deps_in_progress()
+# can see them (they're not read by this asset — embeddings_dir and duckdb are the
+# actual inputs). The trigger event and the missing-dep guard stay scoped to embeddings
+# only via .allow(_ONLY_EMBEDDINGS): synopsis/enrichment will almost always have some
+# partition "missing" simply because the library is still being worked through, and
+# that must never block a rebuild the way an actually-missing embeddings would.
+_WAIT_FOR_PIPELINE_TO_SETTLE = (
+    dg.AutomationCondition.any_deps_updated()
+    .allow(_ONLY_EMBEDDINGS)
+    .since_last_handled()
+    & ~dg.AutomationCondition.any_deps_missing().allow(_ONLY_EMBEDDINGS)
+    & ~dg.AutomationCondition.any_deps_in_progress()
+    & ~dg.AutomationCondition.in_progress()
+).with_label("eager_wait_for_pipeline_to_settle")
+
 
 @dg.asset(
-    automation_condition=dg.AutomationCondition.eager(),
+    automation_condition=_WAIT_FOR_PIPELINE_TO_SETTLE,
     group_name="enrichment",
     kinds={"qdrant"},
-    deps=["embeddings"],
+    deps=["embeddings", "synopsis", "enrichment"],
 )
 def qdrant_collection(
     context: dg.AssetExecutionContext, qdrant: QdrantResource, duckdb: DuckDBResource
@@ -23,9 +46,12 @@ def qdrant_collection(
     incremental per-movie upserts: loading already-computed data into Qdrant is cheap,
     so the simplest correct thing is also the self-correcting one — a movie pruned
     from embeddings/ (see the partition-sync sensor) is absent from the next rebuild
-    *whenever a rebuild actually runs*. Gated by eager(): must never be allowed to
-    drift from whatever embeddings/ currently holds. See docs/pipeline-design.md's
-    "Asset boundary".
+    *whenever a rebuild actually runs*. Gated by _WAIT_FOR_PIPELINE_TO_SETTLE (eager(),
+    widened to treat synopsis/enrichment being in-progress on *any* partition as
+    blocking too, not just embeddings — see that condition's comment): must never be
+    allowed to drift from whatever embeddings/ currently holds, but also must not
+    thrash with a redundant rebuild mid-backfill while the rest of the pipeline is
+    still catching up. See docs/pipeline-design.md's "Asset boundary".
 
     A pure removal (no accompanying addition) has no tracked embeddings update for
     eager() to react to, since the sensor's file deletion is a direct filesystem write,

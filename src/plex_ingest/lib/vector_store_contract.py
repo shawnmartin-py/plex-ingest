@@ -1,11 +1,13 @@
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from qdrant_client.models import Distance
 
 from plex_ingest.lib.media_source import StreamingSource, VideoResolution
 from plex_ingest.lib.stg_movies_reader import MovieCatalogRow
+from plex_ingest.lib.watch_history_reader import WatchHistoryRow
 
 # Mirrors docs/vector-store-contract.md. Keep in sync manually with plex-rag's copy.
 EMBEDDING_MODEL = "gemini-embedding-001"
@@ -18,6 +20,11 @@ SYNOPSIS_KEY = "synopsis"
 # (imdb_id, document key) pair — fixed forever so re-running the rebuild never changes
 # an existing point's ID.
 _POINT_ID_NAMESPACE = uuid.UUID("f4b2b1d0-6c0a-4a9e-9b0a-6b3c1e2f9a11")
+
+# Separate namespace for watch_history_qdrant_collection's points — deliberately
+# distinct from _POINT_ID_NAMESPACE even though the two collections never share point
+# IDs anyway (different Qdrant collections), keeping the two ID spaces independent.
+_WATCH_HISTORY_POINT_ID_NAMESPACE = uuid.UUID("a3e7c9d2-1f4b-4e6a-8c3d-2b9f7e1a5d60")
 
 
 def build_synopsis_document_text(
@@ -106,4 +113,73 @@ def build_points(
             if key != SYNOPSIS_KEY:
                 metadata["section"] = key
             points.append((point_id, data["vector"], data["text"], metadata))
+    return points
+
+
+def build_watch_history_metadata(
+    imdb_id: str,
+    title: str,
+    year: int,
+    imdb_rating: float | None,
+    genres: list[str],
+    last_viewed_at: datetime,
+) -> dict[str, object]:
+    """Matches the `watch_history` collection's "metadata fields" in
+    vector-store-contract.md — a smaller field set than `build_catalog_metadata`'s
+    (no content_rating/thumb_url/video_resolution/source_platform: those are
+    media_items-specific display fields this collection has no use for), plus
+    `last_viewed_at`, which media_items has no equivalent of."""
+    return {
+        "imdb_id": imdb_id,
+        "title": title,
+        "year": year,
+        "imdb_rating": imdb_rating,
+        "genres": ", ".join(genres),
+        "last_viewed_at": last_viewed_at.isoformat(),
+    }
+
+
+def build_watch_history_points(
+    watch_history: dict[str, WatchHistoryRow],
+    embeddings_dir: Path,
+    in_window_ids: set[str],
+) -> list[tuple[str, list[float], str, dict[str, object]]]:
+    """Assemble the (point_id, vector, page_content, metadata) tuples for every
+    embeddings/watch_history/{imdb_id}.json file on disk whose imdb_id is in
+    `in_window_ids`, joined against `watch_history` (the *full*, unwindowed
+    stg_watch_history rows — see `fetch_all_watch_history`). Simpler than
+    `build_points`: exactly one point per imdb_id here (no embedding_type/section
+    split — see vector-store-contract.md's `watch_history` collection section), so
+    each embeddings file holds a single {"text": ..., "vector": ...} object rather
+    than a dict of documents.
+
+    `watch_history` and `in_window_ids` are deliberately separate: an embeddings file
+    with no row in `watch_history` at all means partition sync is out of date (a real
+    bug, raised below); an embeddings file whose imdb_id has a row but isn't in
+    `in_window_ids` just means it aged past the relevance window (expected, silently
+    excluded, not a bug — its embedding stays cached for if a rewatch brings it back
+    into the window later)."""
+    points: list[tuple[str, list[float], str, dict[str, object]]] = []
+    for path in sorted(embeddings_dir.glob("*.json")):
+        imdb_id = path.stem
+        if imdb_id not in watch_history:
+            msg = (
+                f"embeddings/watch_history/{imdb_id}.json exists but no matching "
+                "stg_watch_history row — partition sync is out of date"
+            )
+            raise ValueError(msg)
+        if imdb_id not in in_window_ids:
+            continue
+        row = watch_history[imdb_id]
+        metadata = build_watch_history_metadata(
+            imdb_id,
+            row.title,
+            row.year,
+            row.imdb_rating,
+            row.genres,
+            row.last_viewed_at,
+        )
+        document = json.loads(path.read_text())
+        point_id = str(uuid.uuid5(_WATCH_HISTORY_POINT_ID_NAMESPACE, imdb_id))
+        points.append((point_id, document["vector"], document["text"], metadata))
     return points

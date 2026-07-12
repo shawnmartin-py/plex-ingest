@@ -44,11 +44,15 @@ ENRICHMENT_IO_MANAGER = JsonPartitionIOManager(
 EMBEDDINGS_IO_MANAGER = JsonPartitionIOManager(
     base_dir=f"{PLEX_INGEST_DATA_DIR}/embeddings"
 )
+WATCH_HISTORY_EMBEDDINGS_IO_MANAGER = JsonPartitionIOManager(
+    base_dir=f"{PLEX_INGEST_DATA_DIR}/embeddings/watch_history"
+)
 
 defs = dg.Definitions(
     resources={
         "synopsis_io_manager": SYNOPSIS_IO_MANAGER,
         "enrichment_io_manager": ENRICHMENT_IO_MANAGER,
         "embeddings_io_manager": EMBEDDINGS_IO_MANAGER,
+        "watch_history_embeddings_io_manager": WATCH_HISTORY_EMBEDDINGS_IO_MANAGER,
     }
 )

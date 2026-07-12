@@ -439,6 +439,139 @@ symptoms and debugging steps for each now live in `CLAUDE.md`'s
 3. **Pure removals never triggered a `qdrant_collection` rebuild.** Covered
    above under [Deletion / pruning cascade](#deletion--pruning-cascade--decided-2026-07-05).
 
+## Watch-history diversity-recommender pipeline — implemented (2026-07-12)
+
+New feature in `plex-rag`: a second recommendation mode that suggests
+movies *farthest* (semantically) from a recency-weighted embedding of the
+user's watch history, instead of nearest-neighbor similarity — see
+`plex-rag`'s `docs/diversity-recommender.md` for the read-side design.
+This section covers the new data-pipeline this feature needs here.
+
+Verified end-to-end by invoking the asset functions directly rather than
+via `dg launch` — see CLAUDE.md's "Environment gotchas" for why (a
+pre-existing, unrelated dbt issue currently blocks `dg` for the whole
+repo). The sensor-driven path itself hasn't been exercised live yet;
+worth confirming once that's fixed.
+
+### Why this needs a new pipeline, not a live `plex-rag` call
+
+Considered and rejected: computing watch-history embeddings live in
+`plex-rag` on every app open. Rejected because (a) `gemini-embedding-001`
+is rate-limited per-minute and per-day, and re-embedding the whole watch
+history on every open risks quota exhaustion for no benefit; (b)
+`plex-rag` has no Plex connection today (confirmed: zero references to
+`plexapi`/`PlexServer` in its `app/`) — `plex-ingest` owning the Plex
+connection is already a stated boundary in `plex-rag`'s README, and a
+second live connection would break it. User confirmed minute-level
+freshness isn't needed, so a periodic pipeline run is an acceptable trade
+for avoiding both problems.
+
+### Watch-history data availability — investigated 2026-07-12 against the live server
+
+Plex's local history endpoint (`/status/sessions/history/all`) splits
+roughly 50/50:
+
+- **Resolvable** entries still have a `ratingKey` (still in the local
+  library) — full metadata (`summary`, `Genre`, `Director`, `Guid` incl.
+  `imdb://...`, ratings) available via `/library/metadata/{ratingKey}`.
+- **Unresolvable** entries (deleted after watching, or marked watched
+  manually for content never downloaded — e.g. watched on Netflix/Disney+
+  and flagged by hand) — history gives **only** `title` and
+  `originallyAvailableAt`. No genre, summary, guid, or imdb_id. Confirmed
+  this is really all there is (hitting the `historyKey` resource directly
+  returns the identical payload). Local search endpoints (`/hubs/search`,
+  `/library/search`) don't help — both are scoped to the local library,
+  not Plex's global catalog.
+
+Unresolvable entries **do** fully resolve via Plex's cloud services:
+
+1. `GET https://discover.provider.plex.tv/library/search?query={title}&searchTypes=movies&searchProviders=discover`
+   (the `searchProviders` param is required — omitting it 400s)
+2. Disambiguate the candidate list by exact match on
+   `originallyAvailableAt` against the local history record's value
+   (title collisions across years/remakes are common — 10 "Knock Knock"
+   candidates spanning 1985-2021 came back for one query)
+3. `GET https://metadata.provider.plex.tv/library/metadata/{guid-hash}`
+   (the hash from the matched candidate's `guid`, e.g.
+   `plex://movie/{hash}`) — returns full `summary`, `Genre`, `Director`,
+   `Guid` (incl. `imdb://...`), ratings.
+
+Tested against 9 real unresolvable history entries (Kika, Pacific Rim,
+Blue Bayou, Melissa P., Mektoub My Love, Madrid 1987, Volver, Love and
+Other Disasters, Fish Tank) — 9/9 resolved cleanly with an exact-date
+match. This is the same undocumented API the Plex apps themselves appear
+to use for "Go to Movie" from a history item; no official docs, could
+change without notice.
+
+Decision: apply this **same resolution process uniformly to every
+watch-history entry**, resolvable or not, rather than branching logic per
+bucket — simpler, and the next finding shows resolvable entries' extra
+local richness isn't needed anyway.
+
+### Short description is sufficient embedding input — tested 2026-07-12
+
+Considered: whether Plex's short summary (~80 words) is rich enough to
+embed meaningfully, given the *existing* `media_items` `synopsis` points
+are actually full spoiler-laden plot synopses (~1000+ words, scraped via
+`playwright_scraper.py`) — a ~20x length difference. Tested directly with
+`gemini-embedding-001`: embedded the real ingested Glass Onion synopsis
+point, Plex's own short Glass Onion summary, and an unrelated control
+movie's full synopsis.
+
+```
+cos(long Glass Onion, short Glass Onion)                = 0.887   same movie, 20x length gap
+cos(long Glass Onion, control [different movie, long])  = 0.714   different movie
+cos(short Glass Onion, control [different movie, long]) = 0.712   different movie, mixed length
+```
+
+Same-movie similarity stayed well clear of different-movie similarity
+regardless of length pairing — length isn't acting as a confound here
+(n=1, worth a couple more spot checks before fully trusting it, but it
+directly contradicted the concern that prompted the test). Decision: no
+need for a third-party metadata service (OMDb/TMDb) — Plex's own short
+summary is enough.
+
+### Pipeline shape
+
+New Qdrant collection `watch_history` (schema: `docs/vector-store-contract.md`
+in both repos), kept separate from `media_items`. Implemented as
+`defs/partitions.py`'s `watch_history_imdb_id_partitions`,
+`defs/sensors/sync_watch_history_partitions.py`,
+`defs/assets/stg_watch_history.py`, `defs/assets/watch_history_embeddings.py`,
+and `defs/assets/watch_history_qdrant_collection.py` — deliberately mirrors
+the existing `imdb_id_partitions` / `sync_imdb_id_partitions` /
+`qdrant_collection` pattern, reusing the existing `EmbeddingsResource`/
+`gemini_embeddings` pool as-is.
+
+Two deviations from that existing pattern, both driven by explicit
+requirements from the design conversation rather than incidental —
+worth knowing *that* they're deliberate even though the reasoning itself
+now lives in the code's own docstrings, not duplicated here:
+
+1. Partition sync is **add-only** — unlike the existing sensor, an imdb_id
+   already embedded is never re-embedded just because it later ages out of
+   the fetch window (a rewatch could bring it back into relevance).
+2. The relevance window is enforced at `watch_history_qdrant_collection`
+   **query time, not upstream** — `stg_watch_history` itself is unbounded
+   (an upsert, never pruned by age), following the "full rebuild is cheap
+   once the expensive data exists" philosophy `qdrant_collection` already
+   established.
+
+**dbt vs. Python for `stg_watch_history`: decided Python**, for both the
+raw fetch and the dedupe/upsert transform (2026-07-12, user call — "the raw
+should be python, then we can decide if dbt makes sense for
+transformation"). Resolution needs live Discover API calls per title, not
+a SQL transform of data already at rest, so it doesn't fit `stg_movies`'s
+dbt-model shape. Whether dbt takes over the transform step specifically is
+still open, but nothing is blocked on it.
+
+### Still open
+
+- **Scheduling cadence** for `sync_watch_history_partitions` —
+  `minimum_interval_seconds=300` is a placeholder, not a measured
+  decision. Moot until `dg launch` is unblocked (see CLAUDE.md's
+  "Environment gotchas").
+
 ## Frameworks under consideration
 
 - **LlamaIndex** — for document splitting and/or enrichment. Would

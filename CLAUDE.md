@@ -198,3 +198,10 @@ cross-module imports within this package (PEP 561 marker).
   recurring event, not the one-shot `missing()` transition), with the same
   sensor providing a direct backfill as a supplement for their own
   cold-start case.
+- **`dg launch`/`dg check` currently fail for the entire code location**,
+  not just any one asset — `dbt1060 UnusedConfigKey "meta"` in
+  `dbt_project/models/staging/sources.yml` (the `dagster: asset_key` meta
+  block under `sources`), rejected by the installed dbt-core (1.11.12).
+  Confirmed pre-existing via `git stash -u` on 2026-07-12, unrelated to
+  whatever you're working on. Until fixed, verify asset/sensor logic by
+  invoking the functions directly in a script rather than through `dg`.

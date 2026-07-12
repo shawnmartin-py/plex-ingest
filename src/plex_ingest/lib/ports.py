@@ -10,6 +10,7 @@ resource or any asset.
 """
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Protocol
 
 
@@ -60,3 +61,31 @@ class VectorStore(Protocol):
 
 class MovieCatalog(Protocol):
     def fetch_raw_movies(self) -> list[dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class WatchHistoryEntry:
+    title: str
+    originally_available_at: date
+    viewed_at: datetime
+    rating_key: str | None
+
+
+class WatchHistorySource(Protocol):
+    def fetch_history(self) -> list[WatchHistoryEntry]: ...
+
+
+@dataclass(frozen=True)
+class ResolvedWatchedMovie:
+    imdb_id: str
+    title: str
+    year: int
+    genres: list[str]
+    imdb_rating: float | None
+    summary: str
+
+
+class WatchedMovieResolver(Protocol):
+    def resolve(
+        self, title: str, originally_available_at: date
+    ) -> ResolvedWatchedMovie | None: ...
