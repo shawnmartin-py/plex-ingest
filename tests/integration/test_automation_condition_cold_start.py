@@ -166,12 +166,34 @@ def test_partition_added_after_first_tick_gets_requested_normally() -> None:
 # --- Part 2: real synopsis/enrichment assets produce genuinely fresh content ---
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, thumb_url.
-CatalogRow = tuple[str, str, int, list[str], float, str | None, str | None]
+# content_rating, description, thumb_url, video_resolution, source_platform.
+CatalogRow = tuple[
+    str,
+    str,
+    int,
+    list[str],
+    float,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]
 
 
 def _mock_duckdb(mocker: MockerFixture, imdb_id: str) -> MagicMock:
-    row: CatalogRow = (imdb_id, "Test Film", 2020, ["Drama"], 7.5, "PG-13", None)
+    row: CatalogRow = (
+        imdb_id,
+        "Test Film",
+        2020,
+        ["Drama"],
+        7.5,
+        "PG-13",
+        "A short description.",
+        None,
+        None,
+        None,
+    )
     mock_duckdb = cast(MagicMock, mocker.MagicMock())
     mock_conn = mock_duckdb.get_connection.return_value.__enter__.return_value
     mock_conn.execute.return_value.fetchone.return_value = row
