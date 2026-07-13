@@ -11,14 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from plex_ingest.lib.media_source import StreamingSource, VideoResolution
+from plex_ingest.lib.media_source import HdrFormat, StreamingSource, VideoResolution
 
 if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection
 
 _COLUMNS = (
     "imdb_id, title, year, genres, imdb_rating, content_rating, description, "
-    "thumb_url, video_resolution, source_platform"
+    "thumb_url, video_resolution, hdr_formats, source_platform"
 )
 
 
@@ -33,6 +33,7 @@ class MovieCatalogRow:
     description: str | None
     thumb_url: str | None
     video_resolution: VideoResolution | None
+    hdr_formats: list[HdrFormat]
     source_platform: StreamingSource | None
 
 
@@ -46,12 +47,14 @@ def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
         description,
         thumb_url,
         video_resolution_raw,
+        hdr_formats_raw,
         source_platform_raw,
     ) = row[1:]
     try:
         video_resolution = (
             VideoResolution(video_resolution_raw) if video_resolution_raw else None
         )
+        hdr_formats = [HdrFormat(raw) for raw in hdr_formats_raw]
         source_platform = (
             StreamingSource(source_platform_raw) if source_platform_raw else None
         )
@@ -68,6 +71,7 @@ def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
         description=description,
         thumb_url=thumb_url,
         video_resolution=video_resolution,
+        hdr_formats=hdr_formats,
         source_platform=source_platform,
     )
 

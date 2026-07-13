@@ -165,8 +165,9 @@ def test_partition_added_after_first_tick_gets_requested_normally() -> None:
 
 # --- Part 2: real synopsis/enrichment assets produce genuinely fresh content ---
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, description, thumb_url, video_resolution, source_platform.
+# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# imdb_rating, content_rating, description, thumb_url, video_resolution,
+# hdr_formats, source_platform.
 CatalogRow = tuple[
     str,
     str,
@@ -177,6 +178,7 @@ CatalogRow = tuple[
     str | None,
     str | None,
     str | None,
+    list[str],
     str | None,
 ]
 
@@ -192,6 +194,7 @@ def _mock_duckdb(mocker: MockerFixture, imdb_id: str) -> MagicMock:
         "A short description.",
         None,
         None,
+        [],
         None,
     )
     mock_duckdb = cast(MagicMock, mocker.MagicMock())

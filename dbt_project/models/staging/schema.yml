@@ -17,6 +17,9 @@ models:
           - accepted_values:
               arguments:
                 values: ["sd", "480", "576", "720", "1080", "4k"]
+      - name: hdr_formats
+        data_tests:
+          - not_null
       - name: source_platform
         data_tests:
           - accepted_values:

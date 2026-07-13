@@ -3,6 +3,33 @@ from typing import Any
 
 from plexapi.server import PlexServer
 
+# colorTrc values that indicate an HDR transfer function (PQ for HDR10/HDR10+, HLG for
+# HLG). plexapi has no dedicated hdr/isHdr boolean on VideoStream — this is Plex's own
+# raw color-metadata vocabulary, not a value this repo invents.
+_HDR_COLOR_TRC = {"smpte2084", "arib-std-b67"}
+
+
+def _hdr_formats(video_stream: Any) -> list[str]:
+    """`video_stream` is a `plexapi.media.VideoStream | None`, left untyped like every
+    other plexapi object this adapter touches (see `PlexWatchHistory` for the same
+    convention) — plexapi's own typing is thin enough that pinning the concrete class
+    here would just fight duck-typed test doubles for no real safety gain."""
+    if video_stream is None:
+        return []
+    formats = []
+    if video_stream.colorTrc in _HDR_COLOR_TRC or video_stream.DOVIPresent:
+        formats.append("HDR")
+    if video_stream.DOVIPresent:
+        formats.append("DV")
+    return formats
+
+
+def _first_video_stream(item: Any) -> Any:
+    if not item.media or not item.media[0].parts:
+        return None
+    streams = item.media[0].parts[0].videoStreams()
+    return streams[0] if streams else None
+
 
 class PlexMovieCatalog:
     """Implements the `MovieCatalog` port (see `lib/ports.py`)."""
@@ -21,13 +48,16 @@ class PlexMovieCatalog:
         pre-resolving an imdb_id — that resolution is a staging-layer concern, not a raw
         ingestion one.
 
-        `video_resolution`/`duration_ms`/`file_path` come from the item's first
-        `Media`/`Part` (a movie library item has exactly one of each in this library;
-        there's no multi-version support to pick between). This also covers the
-        streaming-platform placeholder clips (see docs/vector-store-contract.md) —
+        `video_resolution`/`duration_ms`/`file_path`/`hdr_formats` come from the item's
+        first `Media`/`Part` (a movie library item has exactly one of each in this
+        library; there's no multi-version support to pick between). This also covers
+        the streaming-platform placeholder clips (see docs/vector-store-contract.md) —
         they're real `Movie` items with real `Media`/`Part` data, just a much shorter
         `duration_ms` and a `file_path` naming convention staging parses to detect
-        them.
+        them. `hdr_formats` is read from the part's first video stream (`.streams`),
+        one level deeper than the other three fields — see `_hdr_formats`/
+        `_first_video_stream` above for why (plexapi has no HDR/DV signal on `Media`
+        itself, only on `VideoStream`).
 
         `view_count` is captured raw (unfiltered) rather than excluding watched movies
         here — staging applies the unwatched-only business rule, the same split already
@@ -56,6 +86,7 @@ class PlexMovieCatalog:
                     if item.media and item.media[0].parts
                     else None
                 ),
+                "hdr_formats": _hdr_formats(_first_video_stream(item)),
                 "synced_at": synced_at,
             }
             for item in section.search()

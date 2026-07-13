@@ -21,6 +21,19 @@ class VideoResolution(enum.Enum):
     R4K = "4k"
 
 
+class HdrFormat(enum.Enum):
+    """A movie's `hdr_formats` is a list of these, not a single value: a file can be
+    both HDR-compatible and Dolby-Vision-encoded at once (a DV profile 7/8 dual-layer
+    file signals `DOVIPresent` alongside an HDR10-compatible `colorTrc` fallback), so
+    membership isn't mutually exclusive the way `VideoResolution` is. `HDR` is a single
+    flat bucket covering every static/dynamic-metadata HDR transfer function Plex
+    reports (HDR10, HDR10+, HLG) — plexapi's `VideoStream` has no separate signal for
+    HDR10 vs HDR10+, so they're indistinguishable here by construction."""
+
+    HDR = "HDR"
+    DV = "DV"
+
+
 class StreamingSource(enum.Enum):
     """The platform tag embedded in a placeholder clip's filename, e.g.
     "Title - Year - (Netflix).mp4" -> StreamingSource("Netflix"). A closed set by

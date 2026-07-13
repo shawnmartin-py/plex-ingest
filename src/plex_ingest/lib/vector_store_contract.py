@@ -5,7 +5,7 @@ from pathlib import Path
 
 from qdrant_client.models import Distance
 
-from plex_ingest.lib.media_source import StreamingSource, VideoResolution
+from plex_ingest.lib.media_source import HdrFormat, StreamingSource, VideoResolution
 from plex_ingest.lib.stg_movies_reader import MovieCatalogRow
 from plex_ingest.lib.watch_history_reader import WatchHistoryRow
 
@@ -51,6 +51,7 @@ def build_catalog_metadata(
     genres: list[str],
     thumb_url: str | None,
     video_resolution: VideoResolution | None,
+    hdr_formats: list[HdrFormat],
     source_platform: StreamingSource | None,
 ) -> dict[str, object]:
     """Matches plex-rag's MediaItem.to_metadata() exactly — see "metadata fields" in
@@ -58,10 +59,13 @@ def build_catalog_metadata(
     carries movies (no `type` column), matching the contract's "currently the only
     type synced" note. `video_resolution`/`source_platform` are mutually exclusive
     (enforced in stg_movies.sql) and serialized as their raw enum value — plain
-    strings on the wire, like every other contract field. `description` is Plex's own
-    short blurb (`Movie.summary`) — a display-only field, deliberately not folded
-    into `build_synopsis_document_text`'s embedded text, unlike the scraped
-    `synopsis`."""
+    strings on the wire, like every other contract field. `hdr_formats` is a list
+    (unlike every other field here) since a movie can be both HDR- and
+    Dolby-Vision-encoded at once — see `HdrFormat`'s docstring; also nulled to `[]`
+    for placeholder clips in stg_movies.sql, same as `video_resolution`->`None`.
+    `description` is Plex's own short blurb (`Movie.summary`) — a display-only field,
+    deliberately not folded into `build_synopsis_document_text`'s embedded text,
+    unlike the scraped `synopsis`."""
     return {
         "imdb_id": imdb_id,
         "type": "movie",
@@ -73,6 +77,7 @@ def build_catalog_metadata(
         "genres": ", ".join(genres),
         "thumb_url": thumb_url,
         "video_resolution": video_resolution.value if video_resolution else None,
+        "hdr_formats": [fmt.value for fmt in hdr_formats],
         "source_platform": source_platform.value if source_platform else None,
     }
 
@@ -106,6 +111,7 @@ def build_points(
             movie.genres,
             movie.thumb_url,
             movie.video_resolution,
+            movie.hdr_formats,
             movie.source_platform,
         )
 

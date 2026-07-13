@@ -14,6 +14,7 @@ resolved as (
         imdb_rating,
         view_count,
         video_resolution,
+        hdr_formats,
         synced_at,
         list_filter(guids, g -> g like 'imdb://%')[1] as imdb_guid,
         -- Streaming-platform placeholder clips are ~4s stand-ins named
@@ -46,6 +47,10 @@ select
     -- a real download's quality, so it's meaningless and dropped once source_platform
     -- is set — the two fields are mutually exclusive by construction.
     case when source_platform is null then video_resolution end as video_resolution,
+    -- Same reasoning as video_resolution above: a placeholder clip's stream metadata
+    -- describes the ~4s stand-in, not a real download, so it's dropped to an empty
+    -- list rather than carrying meaningless HDR/DV flags.
+    case when source_platform is null then hdr_formats else [] end as hdr_formats,
     source_platform,
     synced_at
 from resolved

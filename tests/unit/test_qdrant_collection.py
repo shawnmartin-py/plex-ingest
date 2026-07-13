@@ -9,10 +9,21 @@ from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, description, thumb_url, video_resolution, source_platform.
+# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# imdb_rating, content_rating, description, thumb_url, video_resolution,
+# hdr_formats, source_platform.
 CatalogRow = tuple[
-    str, str, int, list[str], float, str, str | None, str | None, str | None, str | None
+    str,
+    str,
+    int,
+    list[str],
+    float,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    list[str],
+    str | None,
 ]
 
 
@@ -20,6 +31,7 @@ def _catalog_row(
     imdb_id: str,
     title: str = "Test Film",
     video_resolution: str | None = None,
+    hdr_formats: list[str] | None = None,
     source_platform: str | None = None,
 ) -> CatalogRow:
     return (
@@ -32,6 +44,7 @@ def _catalog_row(
         "A great film.",
         "http://example.com/thumb.jpg",
         video_resolution,
+        hdr_formats if hdr_formats is not None else [],
         source_platform,
     )
 
@@ -134,6 +147,7 @@ def test_points_carry_full_catalog_metadata(
     assert metadata["genres"] == "Drama"
     assert metadata["thumb_url"] == "http://example.com/thumb.jpg"
     assert metadata["video_resolution"] is None
+    assert metadata["hdr_formats"] == []
     assert metadata["source_platform"] is None
 
 
@@ -157,6 +171,64 @@ def test_points_carry_video_resolution_for_a_real_download(
     metadata = points[0][3]
     assert metadata["video_resolution"] == "4k"
     assert metadata["source_platform"] is None
+
+
+def test_points_carry_hdr_formats_for_a_real_download(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_qdrant.collection = "media_items"
+    mock_qdrant.point_count.return_value = 1
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", hdr_formats=["HDR"])])
+
+    qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
+
+    (points,), _ = mock_qdrant.upsert_points.call_args
+    metadata = points[0][3]
+    assert metadata["hdr_formats"] == ["HDR"]
+
+
+def test_points_carry_both_hdr_and_dv_when_both_present(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_qdrant.collection = "media_items"
+    mock_qdrant.point_count.return_value = 1
+    mock_duckdb = _mock_duckdb(
+        mocker, [_catalog_row("tt0001", hdr_formats=["HDR", "DV"])]
+    )
+
+    qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
+
+    (points,), _ = mock_qdrant.upsert_points.call_args
+    metadata = points[0][3]
+    assert metadata["hdr_formats"] == ["HDR", "DV"]
+
+
+def test_unrecognized_hdr_format_raises(tmp_path: Path, mocker: MockerFixture) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", hdr_formats=["HDR10+"])])
+
+    with pytest.raises(ValueError, match="tt0001"):
+        qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
 
 def test_points_carry_source_platform_for_a_streaming_placeholder(

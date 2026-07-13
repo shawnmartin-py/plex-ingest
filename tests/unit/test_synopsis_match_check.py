@@ -18,6 +18,7 @@ CatalogRow = tuple[
     str | None,
     str | None,
     str | None,
+    list[str],
     str | None,
 ]
 
@@ -37,7 +38,7 @@ def _check_context(partition_key: str) -> dg.AssetCheckExecutionContext:
 def _catalog_row(
     imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
 ) -> CatalogRow:
-    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, None)
+    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, [], None)
 
 
 def _mock_duckdb(mocker: MockerFixture, row: CatalogRow | None) -> MagicMock:

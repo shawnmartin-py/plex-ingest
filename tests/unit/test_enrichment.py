@@ -8,8 +8,9 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.enrichment import enrichment
 from plex_ingest.lib.adapters.gemini_enrichment import DailyQuotaExhaustedError
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres, imdb_rating,
-# content_rating, description, thumb_url, video_resolution, source_platform.
+# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# imdb_rating, content_rating, description, thumb_url, video_resolution,
+# hdr_formats, source_platform.
 CatalogRow = tuple[
     str,
     str,
@@ -20,6 +21,7 @@ CatalogRow = tuple[
     str | None,
     str | None,
     str | None,
+    list[str],
     str | None,
 ]
 
@@ -27,7 +29,7 @@ CatalogRow = tuple[
 def _catalog_row(
     imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
 ) -> CatalogRow:
-    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, None)
+    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, [], None)
 
 
 def _mock_duckdb(mocker: MockerFixture, row: CatalogRow | None) -> MagicMock:
