@@ -58,7 +58,7 @@ relate.
 Runs against the full library end to end, verified against the real
 Plex/Gemini/Qdrant stack.
 
-![Dagster asset graph — raw_movies → stg_movies → synopsis/enrichment → embeddings → qdrant_collection](docs/images/dagster-asset-graph.png)
+![Dagster asset graph — raw_movies → stg_movies → synopsis/enrichment → embeddings → qdrant_collection, plus the watch_history group (stg_watch_history → watch_history_embeddings → watch_history_qdrant_collection)](docs/images/dagster-asset-graph.png)
 
 - `raw_movies` — full overwrite of the Plex movie library into DuckDB on
   every run (`src/plex_ingest/defs/assets/raw_movies.py`). Manual entry
