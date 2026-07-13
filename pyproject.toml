@@ -54,6 +54,10 @@ select = ["E", "F", "W", "I", "S", "B", "UP"]
 "tests/**" = ["S101"]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not live'"
+markers = [
+    "live: hits real IMDb/Wikipedia pages over the network (canary for DOM/API drift); excluded by default, run explicitly with `pytest -m live`",
+]
 filterwarnings = [
     # Dagster's own pydantic-compat shim reads __fields__ internally; nothing
     # in our code touches that attribute directly, so this can't be fixed
