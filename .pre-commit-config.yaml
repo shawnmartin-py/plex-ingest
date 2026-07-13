@@ -9,6 +9,11 @@ repos:
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-added-large-files
+        exclude: ^docs/images/
+      - id: check-added-large-files
+        name: check-added-large-files (screenshots)
+        args: [--maxkb=1000]
+        files: ^docs/images/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.16
