@@ -16,7 +16,7 @@ repos:
         files: ^docs/images/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.16
+    rev: v0.15.21
     hooks:
       - id: ruff
         language_version: python3.13
