@@ -181,7 +181,7 @@ def test_removal_requests_a_qdrant_collection_rebuild(
     assert run_requests[0].asset_selection == [dg.AssetKey("qdrant_collection")]
 
 
-def test_addition_backfills_the_new_partition_and_rebuilds_qdrant(
+def test_addition_backfills_the_new_partition_without_a_direct_qdrant_rebuild(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
     _patch_stage_io_managers(mocker, tmp_path)
@@ -190,9 +190,11 @@ def test_addition_backfills_the_new_partition_and_rebuilds_qdrant(
     instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt0001"])
     context = dg.build_sensor_context(instance=instance)
 
-    # tt0002 is new and has no on-disk files -> gets backfilled directly; embeddings
-    # is among the missing assets, so qdrant_collection is requested too rather than
-    # relying solely on its own eager() (see sync_imdb_id_partitions's docstring).
+    # tt0002 is new and has no on-disk files -> gets backfilled directly. No direct
+    # qdrant_collection request accompanies it: that would fire before embeddings has
+    # actually finished for tt0002, a redundant premature rebuild (removed 2026-07-14
+    # -- see sync_imdb_id_partitions's docstring). qdrant_collection's own
+    # eager()-derived condition reacts once embeddings genuinely updates.
     result = sync_imdb_id_partitions(
         context, duckdb=_mock_duckdb(mocker, {"tt0001", "tt0002"})
     )
@@ -200,15 +202,14 @@ def test_addition_backfills_the_new_partition_and_rebuilds_qdrant(
     assert isinstance(result, dg.SensorResult)
     run_requests = result.run_requests
     assert run_requests is not None
-    assert len(run_requests) == 2
-    backfill = next(r for r in run_requests if r.partition_key == "tt0002")
+    assert len(run_requests) == 1
+    backfill = run_requests[0]
+    assert backfill.partition_key == "tt0002"
     assert set(backfill.asset_selection or []) == {
         dg.AssetKey("synopsis"),
         dg.AssetKey("enrichment"),
         dg.AssetKey("embeddings"),
     }
-    rebuild = next(r for r in run_requests if r.partition_key is None)
-    assert rebuild.asset_selection == [dg.AssetKey("qdrant_collection")]
 
 
 def test_no_changes_requests_nothing_once_fully_materialized(
@@ -314,10 +315,9 @@ def test_no_duplicate_backfill_while_one_is_in_flight(
     context = dg.build_sensor_context(instance=instance)
     second = sync_imdb_id_partitions(context, duckdb=_mock_duckdb(mocker, {"tt0001"}))
     assert isinstance(second, dg.SensorResult)
-    # tt0001 itself must not be re-requested; a qdrant rebuild request is still fine
-    # here (tt0001's still-missing embeddings independently trigger that need, and
-    # this specific qdrant signature was never itself put in flight).
-    assert all(r.partition_key != "tt0001" for r in (second.run_requests or []))
+    # tt0001 itself must not be re-requested; no other requests are expected here
+    # (no removal happened, so nothing else would trigger a qdrant_collection request).
+    assert (second.run_requests or []) == []
 
 
 def test_backfill_is_retried_after_a_terminal_failure(

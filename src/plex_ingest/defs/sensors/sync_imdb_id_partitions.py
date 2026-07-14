@@ -99,13 +99,21 @@ def sync_imdb_id_partitions(
     state and backfilled directly if anything is missing. An imdb_id no longer in
     stg_movies gets its partition removed *and* its on-disk synopsis/enrichment/
     embeddings files deleted, so the next qdrant_collection rebuild naturally excludes
-    it. qdrant_collection is requested directly whenever a removal happened or a
-    partition's embeddings needed backfilling: both are invisible or unreliable for
-    qdrant_collection's own eager() condition to react to on its own (file deletion
-    isn't tracked at all; a cold-started embeddings materialization is exactly the same
-    missing()-cursor pitfall this sensor exists to avoid). Duplicate-request
-    prevention is done via `_in_flight_signatures`, not Dagster's own `run_key`
-    dedup — see the comment above `_BACKFILL_SIGNATURE_TAG_KEY` for why."""
+    it. qdrant_collection is requested directly only when a removal happened: file
+    deletion is a raw filesystem write, invisible to Dagster's materialization
+    tracking, so it's the one case qdrant_collection's own eager()-derived condition
+    truly cannot react to on its own. A freshly-backfilled embeddings partition needs
+    no equivalent direct request here — that's an ordinary `any_deps_updated()` event
+    (see qdrant_collection.py's automation_condition), unaffected by the
+    missing()-cursor pitfall above: that bug is specific to the automation-condition
+    cursor's literal evaluation_id 0, a one-time historical event for a running
+    instance, not to a partition's own first materialization, which happens at
+    whatever evaluation_id the cursor has reached by then. A prior version of this
+    sensor requested qdrant_collection directly here too, which caused a redundant
+    premature rebuild before embeddings had actually finished for the partition —
+    removed 2026-07-14. Duplicate-request prevention is done via
+    `_in_flight_signatures`, not Dagster's own `run_key` dedup — see the comment above
+    `_BACKFILL_SIGNATURE_TAG_KEY` for why."""
     with duckdb.get_connection() as conn:
         current_ids = {
             row[0] for row in conn.execute("SELECT imdb_id FROM stg_movies").fetchall()
@@ -145,13 +153,10 @@ def sync_imdb_id_partitions(
     in_flight = _in_flight_signatures(context.instance)
 
     run_requests: list[dg.RunRequest] = []
-    embeddings_backfill_ids: set[str] = set()
     for imdb_id in sorted(desired_ids):
         missing_assets = _missing_stage_assets(imdb_id)
         if not missing_assets:
             continue
-        if dg.AssetKey("embeddings") in missing_assets:
-            embeddings_backfill_ids.add(imdb_id)
         missing_signature = "-".join(sorted(k.to_user_string() for k in missing_assets))
         backfill_signature = f"{imdb_id}:{missing_signature}"
         if backfill_signature in in_flight:
@@ -175,14 +180,12 @@ def sync_imdb_id_partitions(
             )
         )
 
-    if removed_ids or embeddings_backfill_ids:
+    if removed_ids:
         # Signature of *why* a qdrant_collection rebuild is needed right now, used
         # the same way as backfill_signature above (not as run_key).
         qdrant_signature = (
             "qdrant:"
-            + hashlib.sha256(
-                f"{sorted(removed_ids)}|{sorted(embeddings_backfill_ids)}".encode()
-            ).hexdigest()[:16]
+            + hashlib.sha256(f"{sorted(removed_ids)}".encode()).hexdigest()[:16]
         )
         if qdrant_signature not in in_flight:
             run_requests.append(

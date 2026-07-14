@@ -24,25 +24,6 @@ def _missing_embeddings(imdb_id: str) -> bool:
     return not WATCH_HISTORY_EMBEDDINGS_IO_MANAGER.path_for(imdb_id).exists()
 
 
-def _qdrant_collection_needs_cold_start(instance: dg.DagsterInstance) -> bool:
-    """True until `watch_history_qdrant_collection` has materialized at least once.
-    Deliberately independent of this tick's `backfilled_any` -- that flag is derived
-    from on-disk embeddings state and goes false again the moment an embedding lands,
-    even if the *qdrant* RunRequest that was supposed to consume it failed to submit
-    (e.g. a transient resource-config error). Without this check, that failure
-    silently and permanently strands the cold start: no future tick would see
-    anything "newly missing" to re-trigger it, since eager() can't catch this cold
-    start either (see this sensor's docstring). Checked directly against the
-    materialization event log, not a cursor, for the same reason `_missing_embeddings`
-    checks on-disk state directly."""
-    return (
-        instance.get_latest_materialization_event(
-            dg.AssetKey("watch_history_qdrant_collection")
-        )
-        is None
-    )
-
-
 def compute_new_partition_ids(
     desired_ids: set[str], registered_ids: set[str]
 ) -> set[str]:
@@ -55,10 +36,7 @@ def compute_new_partition_ids(
 @dg.sensor(
     minimum_interval_seconds=_MINIMUM_INTERVAL_SECONDS,
     default_status=dg.DefaultSensorStatus.RUNNING,
-    asset_selection=[
-        dg.AssetKey("watch_history_embeddings"),
-        dg.AssetKey("watch_history_qdrant_collection"),
-    ],
+    asset_selection=[dg.AssetKey("watch_history_embeddings")],
 )
 def sync_watch_history_partitions(
     context: dg.SensorEvaluationContext, duckdb: DuckDBResource
@@ -79,24 +57,22 @@ def sync_watch_history_partitions(
     driving this whole pipeline's design -- see docs/pipeline-design.md's
     "Watch-history diversity-recommender pipeline".
 
-    `watch_history_qdrant_collection` is requested directly whenever anything gets
-    backfilled *or* it has never materialized (`_qdrant_collection_needs_cold_start`),
-    the same cold-start gap `sync_imdb_id_partitions` covers for `qdrant_collection`: a
-    freshly-backfilled `watch_history_embeddings` partition is exactly the case
-    `eager()` can't reliably react to on its own. The cold-start check is deliberately
-    separate from `backfilled_any` -- confirmed 2026-07-12: an embeddings RunRequest
-    can succeed while the paired qdrant RunRequest in the same tick fails to submit
-    (e.g. a resource-config error), after which `backfilled_any` alone would never be
-    true again for that imdb_id since its embedding already exists on disk, silently
-    and permanently stranding `watch_history_qdrant_collection` at "never
-    materialized" with nothing left to re-trigger it. Its own steady-state reaction to
-    a `stg_watch_history`-only change (e.g. a rewatch updating `last_viewed_at` with no
-    new embedding needed) is left to `eager()`, which is the "ordinary steady-state
-    cascade" case already proven to work elsewhere in this pipeline -- once
-    `watch_history_qdrant_collection` has materialized once, cold-start requests stop
-    and `eager()` takes over. Duplicate-request prevention uses the shared
-    `run_dedup.in_flight_signatures`, not Dagster's own `run_key` dedup -- see
-    `run_dedup.py`'s module docstring for why."""
+    Unlike `sync_imdb_id_partitions`, this sensor never requests
+    `watch_history_qdrant_collection` directly -- it's left entirely to that asset's
+    own `eager()` condition. A prior version requested it directly whenever anything
+    got backfilled, or via a `_qdrant_collection_needs_cold_start` check for the case
+    where it had never materialized at all; both were removed 2026-07-14 (see
+    `sync_imdb_id_partitions`'s docstring and docs/pipeline-design.md's "Known gaps",
+    item 2 correction for the full reasoning this mirrors). `any_deps_updated()` --
+    what `eager()` actually reacts to -- is a plain materialization event read off the
+    instance's event log; it fires correctly the first time a `watch_history_embeddings`
+    partition materializes just as reliably as the hundredth time, regardless of
+    whether *this* sensor's own RunRequest for it succeeds, fails to submit, or
+    doesn't exist at all. There is no add-only equivalent of `sync_imdb_id_partitions`'s
+    `removed_ids` case here (this sensor never deletes anything), so no scenario
+    remains where a direct trigger is actually necessary. Duplicate-request
+    prevention uses the shared `run_dedup.in_flight_signatures`, not Dagster's own
+    `run_key` dedup -- see `run_dedup.py`'s module docstring for why."""
     with duckdb.get_connection() as conn:
         current_ids = {
             row[0]
@@ -122,11 +98,9 @@ def sync_watch_history_partitions(
     )
 
     run_requests: list[dg.RunRequest] = []
-    backfilled_any = False
     for imdb_id in sorted(current_ids | registered_ids):
         if not _missing_embeddings(imdb_id):
             continue
-        backfilled_any = True
         signature = f"{imdb_id}:embeddings"
         if signature in in_flight:
             continue
@@ -138,17 +112,6 @@ def sync_watch_history_partitions(
                 tags={_BACKFILL_SIGNATURE_TAG_KEY: signature},
             )
         )
-
-    if backfilled_any or _qdrant_collection_needs_cold_start(context.instance):
-        qdrant_signature = "watch_history_qdrant_rebuild"
-        if qdrant_signature not in in_flight:
-            run_requests.append(
-                dg.RunRequest(
-                    run_key=f"{qdrant_signature}:{uuid.uuid4().hex[:8]}",
-                    asset_selection=[dg.AssetKey("watch_history_qdrant_collection")],
-                    tags={_BACKFILL_SIGNATURE_TAG_KEY: qdrant_signature},
-                )
-            )
 
     return dg.SensorResult(
         run_requests=run_requests,

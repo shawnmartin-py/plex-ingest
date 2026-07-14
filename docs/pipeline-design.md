@@ -427,14 +427,31 @@ symptoms and debugging steps for each now live in `CLAUDE.md`'s
    trigger. On every tick, for every currently-desired partition, it checks
    on-disk file presence directly (`_missing_stage_assets`) and issues a
    `RunRequest` for whatever's missing, sidestepping the
-   automation-condition cursor entirely. This also covers `embeddings`'s
-   own cold-start case: if a desired partition's `embeddings` file is
-   missing, the sensor also requests a `qdrant_collection` rebuild
-   directly, rather than trusting `qdrant_collection`'s `eager()` to notice
-   on its own. `embeddings` keeps its `eager()` condition for the ordinary
-   steady-state cascade (re-embed when `enrichment` changes after a manual
-   backfill) — that path reacts to `any_deps_updated`, a recurring event
-   unaffected by the one-shot `missing()` bug.
+   automation-condition cursor entirely. `embeddings` keeps its `eager()`
+   condition for its own trigger (re-embed when `enrichment` changes,
+   including a partition's first-ever embedding) — that path reacts to
+   `any_deps_updated`, a recurring event unaffected by the one-shot
+   `missing()` bug.
+
+   **Correction, found and fixed 2026-07-14.** An earlier version of this
+   fix reasoned that `embeddings`'s cold start needed the same direct-sensor
+   treatment, so `sync_imdb_id_partitions` also requested a
+   `qdrant_collection` rebuild directly whenever a partition's `embeddings`
+   needed backfilling. That conflated two different meanings of "cold
+   start": the `evaluation_id == 0` bug above is a one-time historical
+   event (the automation-condition cursor's literal first-ever tick, long
+   past for a running instance), not a property of any individual
+   partition's first materialization, which fires `any_deps_updated()`
+   completely normally whenever it happens. The redundant direct trigger
+   caused `qdrant_collection` to run once immediately (before `embeddings`
+   had actually finished for the partition, producing a stale/wasted
+   rebuild) and then again correctly once `qdrant_collection`'s own
+   `eager()`-derived condition reacted to the real `embeddings` update.
+   **Fix:** the direct trigger now fires only on `removed_ids` — the one
+   case genuinely invisible to `eager()`, since file deletion is a raw
+   filesystem write with no materialization event at all (see "Deletion /
+   pruning cascade" below). A backfilled `embeddings` partition is left
+   entirely to `qdrant_collection`'s own condition.
 
 3. **Pure removals never triggered a `qdrant_collection` rebuild.** Covered
    above under [Deletion / pruning cascade](#deletion--pruning-cascade--decided-2026-07-05).
@@ -557,6 +574,25 @@ now lives in the code's own docstrings, not duplicated here:
    once the expensive data exists" philosophy `qdrant_collection` already
    established.
 
+**Correction, found and fixed 2026-07-14.** `sync_watch_history_partitions`
+originally also mirrored `qdrant_collection`'s (pre-correction)
+direct-trigger pattern: it requested `watch_history_qdrant_collection`
+directly whenever anything got backfilled, plus a separate
+`_qdrant_collection_needs_cold_start` check for the case where it had never
+materialized at all. Both were removed alongside the equivalent fix to
+`sync_imdb_id_partitions` (see "Known gaps," item 2's correction) — the
+same reasoning applies, and more cleanly here: `any_deps_updated()` (what
+`watch_history_qdrant_collection`'s `eager()` condition reacts to) is a
+plain materialization-event read off the instance's event log, unaffected
+by which sensor (if any) requested the run that produced it, and fires
+correctly on a partition's first-ever materialization just as reliably as
+its hundredth. Unlike `qdrant_collection`, there was never a genuine
+residual case here needing a direct trigger — this sensor is add-only and
+never deletes anything, so there's no `removed_ids`-equivalent gap for
+`eager()` to miss. `sync_watch_history_partitions` now only ever requests
+`watch_history_embeddings`, and `watch_history_qdrant_collection` is left
+entirely to its own `eager()` condition.
+
 **dbt vs. Python for `stg_watch_history`: decided Python**, for both the
 raw fetch and the dedupe/upsert transform (2026-07-12, user call — "the raw
 should be python, then we can decide if dbt makes sense for
@@ -656,6 +692,66 @@ actually matches what they're for (structured extract-load).
 Environment/tooling gotchas that fell out of these decisions (Python 3.13
 pin, mypy pin, `DAGSTER_HOME` requirements) are in `CLAUDE.md`, not
 duplicated here.
+
+## Docker `dg dev` memory footprint — investigated 2026-07-14, fix deferred
+
+The Dockerized `dagster` service's `dg dev` runs at ~973MB RSS (against a
+5.785GiB container limit — not currently urgent, but investigated on
+request). `docker top`-ing the container breaks it down:
+
+| Process | RSS |
+|---|---|
+| `dagster api grpc --lazy-load-user-code` (the actual code server holding `plex_ingest.definitions`) | 374 MB |
+| `dg dev` supervisor | 182 MB |
+| `dagster-webserver` | 173 MB |
+| `dagster._daemon` | 142 MB |
+| `dagster code-server` supervisor (parent of the grpc process above) | 102 MB |
+| misc (`uv run`, multiprocessing resource_tracker) | ~63 MB |
+
+The webserver/daemon/supervisor overhead (~600MB) is Dagster's normal
+dev-mode 3-process architecture and isn't reducible without dropping the
+daemon (kills sensors/schedules) or the webserver (kills the UI) — not
+worth it.
+
+The one real lever is the 374MB code-server process: all seven
+`defs/resources/*.py` files (`embeddings.py`, `enrichment_llm.py`,
+`scraper.py`, `synopsis_judge.py`, `qdrant.py`, `plex.py`,
+`plex_watch_history.py`) import their concrete adapter class (e.g.
+`GeminiEmbeddingClient`, `GroqSynopsisJudge`, `PlaywrightSynopsisScraper`)
+at module top-level, even though each is only ever constructed inside the
+resource's own `_adapter()` method. Dagster must import every file under
+`defs/` to build the asset graph, so this long-lived process eagerly pays
+for every vendor SDK's import cost even though it never actually calls
+`_adapter()` — that only happens in the short-lived per-run subprocess a
+launched run executes in. Measured import cost inside the container
+(`resource.getrusage(...).ru_maxrss` delta per module):
+
+- `langchain_google_genai` (Gemini embeddings + enrichment): 86.5 MB
+- `qdrant_client`: 34 MB
+- `groq` + `langchain_groq`: 1.6 MB
+- `playwright`: 4.1 MB
+- `plexapi`: 2.6 MB
+
+**Two-tier fix, not yet applied:**
+
+1. Move each resource's adapter import from module top-level into its
+   `_adapter()` method body (7 files). Behavior-preserving, low risk.
+   Recovers ~95MB — everything above except `qdrant_client`.
+2. `qdrant_client`'s 34MB survives step 1 because
+   `lib/vector_store_contract.py` does
+   `from qdrant_client.models import Distance` at module level, and it's
+   imported by four *asset* files (`assets/embeddings.py`,
+   `assets/qdrant_collection.py`, `assets/watch_history_embeddings.py`,
+   `assets/watch_history_qdrant_collection.py`), which are always eagerly
+   loaded to build the asset graph — no way around that part. Recovering
+   this would mean replacing the imported `Distance` enum in
+   `vector_store_contract.py` with our own domain constant instead of
+   Qdrant's, which is a bigger change to a file shared across four assets,
+   not a pure resource-layer tweak.
+
+Deferred rather than applied on 2026-07-14 — revisit if the container's
+footprint becomes an actual constraint (host memory pressure, tighter
+`mem_limit`), not just a curiosity.
 
 ## Working notes
 
