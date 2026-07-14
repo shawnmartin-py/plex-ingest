@@ -223,3 +223,25 @@ cross-module imports within this package (PEP 561 marker).
   If `.dagster_home` grows large again, check for this same pattern before
   assuming it's a new leak — compare `ls .dagster_home/history/runs | wc -l`
   against `DagsterInstance.get_runs_count()` rather than guessing.
+- **Instance-wide auto-materialize (`instance.autoMaterializePaused`) was
+  found `true` on the Dockerized instance on 2026-07-14** — likely an
+  emergency-brake leftover from the 2026-07-06 backlog/concurrency
+  incidents (above) that never got switched back on. This is a global
+  daemon toggle, not part of any asset/sensor definition or YAML config, so
+  it doesn't show up in a code diff — check it directly via
+  `instance { autoMaterializePaused }` (GraphQL) if `eager()`-gated assets
+  stop reacting to upstream updates. **Symptom seen:** `sync_imdb_id_partitions`
+  still added new imdb_id partitions and directly backfilled
+  `synopsis`/`enrichment`/`embeddings` (that path doesn't depend on the
+  daemon), but `qdrant_collection` — which relies on `eager()`'s
+  `any_deps_updated` cascade for its steady-state rebuilds, per the
+  "Known gaps" note above — silently stopped rebuilding after any
+  embeddings change that didn't happen to land in the same sensor tick as
+  a rebuild. A specific movie (`tt26657236`) sat in `embeddings/` for 3+
+  hours without making it into Qdrant as a result; `plex-rag check-imdb`
+  was the first signal. Fixed via the `setAutoMaterializePaused(paused:
+  false)` GraphQL mutation. If `check-imdb` says `false` for a movie whose
+  `embeddings/{imdb_id}.json` already exists on disk, check this flag
+  before assuming a new bug — compare `qdrant_collection`'s last
+  materialization timestamp against the embeddings file's mtime; if the
+  rebuild is older, the cascade didn't fire.
