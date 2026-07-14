@@ -8,5 +8,26 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  dagster:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Container-network-appropriate overrides for values that are host-relative
+      # in .env — see README's "Running in Docker" for why these three differ.
+      QDRANT_URL: http://qdrant:6333
+      DAGSTER_HOME: /app/.dagster_home
+      DUCKDB_PATH: /app/data/plex_ingest.duckdb
+    volumes:
+      - dagster_home:/app/.dagster_home
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./dbt_project:/app/dbt_project
+    depends_on:
+      - qdrant
+
 volumes:
   qdrant_storage:
+  dagster_home:

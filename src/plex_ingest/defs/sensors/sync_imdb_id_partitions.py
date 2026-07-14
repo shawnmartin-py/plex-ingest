@@ -80,7 +80,7 @@ def compute_partition_diff(
 
 
 @dg.sensor(
-    minimum_interval_seconds=60,
+    minimum_interval_seconds=600,
     default_status=dg.DefaultSensorStatus.RUNNING,
     asset_selection=[*_STAGE_ASSET_KEYS, dg.AssetKey("qdrant_collection")],
 )

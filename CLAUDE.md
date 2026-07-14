@@ -198,3 +198,19 @@ cross-module imports within this package (PEP 561 marker).
   recurring event, not the one-shot `missing()` transition), with the same
   sensor providing a direct backfill as a supplement for their own
   cold-start case.
+- **A cleared run backlog can still leave `DAGSTER_HOME` bloated — deleting
+  run *records* doesn't delete their per-run event-log files.** Confirmed
+  2026-07-14: the 2026-07-06 28k-run backlog (above) was long since cleared
+  from run storage (only 1,053 real runs remained), but
+  `.dagster_home/history/runs/` still held 29,614 per-run SQLite files —
+  28,561 of them (3.05 GB) had no matching run in `runs.db` at all,
+  orphaned rather than cleaned up alongside their run record.
+  `.dagster_home` was 3.6 GB total, almost entirely this orphan pile. Fixed
+  by cross-referencing every on-disk `<run_id>.db` filename against
+  `DagsterInstance.get_runs()`'s live IDs and deleting the ones with no
+  match, then `VACUUM`-ing `history/runs.db` and `history/runs/index.db`
+  (176M→6.4M and 160M→14M respectively — both were still sized for the
+  runs they used to index). Result: 3.6 GB → 277 MB, 0 live runs affected.
+  If `.dagster_home` grows large again, check for this same pattern before
+  assuming it's a new leak — compare `ls .dagster_home/history/runs | wc -l`
+  against `DagsterInstance.get_runs_count()` rather than guessing.

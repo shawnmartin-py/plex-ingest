@@ -13,10 +13,11 @@ _SENSOR_NAME = "sync_watch_history_partitions"
 
 _BACKFILL_SIGNATURE_TAG_KEY = "plex_ingest/watch_history_backfill_signature"
 
-# Coarser than sync_imdb_id_partitions's 60s: this doesn't need that granularity (see
-# docs/pipeline-design.md's still-open "Scheduling cadence" question -- 120s is a
-# reasonable default pending a real decision there, not a load-bearing choice).
-_MINIMUM_INTERVAL_SECONDS = 120
+# Matches sync_imdb_id_partitions's interval (see docs/pipeline-design.md's
+# "Scheduling cadence" -- both sensors are pool-bound rather than tick-rate-bound,
+# so ticking faster than this buys no real throughput, just wasted DB/file-stat
+# overhead; see that doc for the full reasoning).
+_MINIMUM_INTERVAL_SECONDS = 600
 
 
 def _missing_embeddings(imdb_id: str) -> bool:

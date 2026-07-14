@@ -61,12 +61,11 @@ Plex/Gemini/Qdrant stack.
 ![Dagster asset graph — raw_movies → stg_movies → synopsis/enrichment → embeddings → qdrant_collection, plus the watch_history group (stg_watch_history → watch_history_embeddings → watch_history_qdrant_collection)](docs/images/dagster-asset-graph.png)
 
 - `raw_movies` — full overwrite of the Plex movie library into DuckDB on
-  every run (`src/plex_ingest/defs/assets/raw_movies.py`). Manual entry
-  point only (see "Getting started") — nothing triggers it automatically.
+  every run (`src/plex_ingest/defs/assets/raw_movies.py`).
 - `stg_movies` — a dbt model (`dbt_project/models/staging/stg_movies.sql`)
   that resolves `imdb_id` out of Plex's raw `guids` list and drops items
   with no IMDb match, with `not_null`/`unique` tests on `imdb_id` and
-  `rating_key`. Also a manual entry point.
+  `rating_key`.
 - `synopsis`, `enrichment`, `embeddings` — partitioned by `imdb_id`
   (`src/plex_ingest/defs/assets/{synopsis,enrichment,embeddings}.py`).
   `synopsis`/`enrichment` carry no `automation_condition` — the
@@ -85,6 +84,13 @@ Plex/Gemini/Qdrant stack.
 - `sync_imdb_id_partitions` — sensor keeping the `imdb_id` dynamic
   partition set in sync with `stg_movies`, including a deletion cascade for
   movies no longer in Plex (`src/plex_ingest/defs/sensors/`).
+- `poll_plex_job` — schedule that materializes `raw_movies` → `stg_movies`
+  → `stg_watch_history` daily at 1am UTC
+  (`src/plex_ingest/defs/schedules/poll_plex_daily.py`). This is what keeps
+  the pipeline's entry-point assets fresh day to day; everything downstream
+  of them still runs via the sensors/`eager()` cascade described above and
+  below. For an immediate first materialization rather than waiting for the
+  next 1am tick, see "Getting started"/"Running the pipeline end-to-end".
 - `synopsis_matches_movie` — a **data-quality asset check**
   (`src/plex_ingest/defs/checks/synopsis_match.py`), distinct from the
   `tests/` code tests, that verifies a scraped synopsis actually describes
@@ -114,8 +120,8 @@ pipeline above but feeding its own Qdrant collection:
   Plex's Discover API (`src/plex_ingest/defs/assets/stg_watch_history.py`,
   using `PlexWatchHistoryResource`). Deliberately unpartitioned and
   upserts into an accumulating DuckDB table rather than overwriting, so a
-  row survives after it ages out of the fetch window. Manual entry point,
-  same as `raw_movies`/`stg_movies`.
+  row survives after it ages out of the fetch window. Covered by the same
+  `poll_plex_job` daily schedule as `raw_movies`/`stg_movies` (see above).
 - `watch_history_embeddings` — partitioned by `watch_history_imdb_id`
   (a separate, add-only partition set from `imdb_id`); embeds one
   synopsis-shaped document per movie, no synopsis/enrichment split
@@ -140,9 +146,7 @@ pipeline above but feeding its own Qdrant collection:
 See `docs/pipeline-design.md`'s "Watch-history diversity-recommender
 pipeline" for the full design rationale, and
 `docs/vector-store-contract.md`'s `watch_history` collection section for
-the payload shape. Not yet exercised via a live sensor tick — see
-CLAUDE.md's "Environment gotchas" for the pre-existing `dg launch`/`dg
-check` issue blocking that, unrelated to this pipeline.
+the payload shape.
 
 ## Testing
 
@@ -243,55 +247,87 @@ uv run dagster instance concurrency set groq_synopsis_judge 2
 Or run `make up` / `make pools` for the equivalent shortcuts — see
 "Makefile shortcuts" below.
 
+### Running in Docker
+
+`docker-compose.yml` has a `dagster` service that builds this repo's
+`Dockerfile` and runs `dg dev` inside the container instead of on the host.
+One command brings up everything (Qdrant via `depends_on`, the webserver,
+the daemon, and the concurrency pool limits):
+
+```bash
+docker compose up
+```
+
+(`make dev-docker` runs the same thing with an explicit `--build`.) Open
+http://localhost:3000 as usual once it's up. A few things differ from
+running `uv run dg dev` on the host:
+
+- **`QDRANT_URL`, `DAGSTER_HOME`, and `DUCKDB_PATH` are overridden** in
+  `docker-compose.yml`'s `environment:` block (not `.env`) — `.env`'s
+  values are host paths/`localhost`, which don't resolve inside the
+  container. `QDRANT_URL` points at the `qdrant` service by Docker DNS
+  name instead of `localhost`; `DAGSTER_HOME`/`DUCKDB_PATH` point at
+  in-container paths backed by the volumes below. Everything else
+  (`GOOGLE_API_KEY`, `GROQ_API_KEY`, `PLEXAPI_AUTH_SERVER_*`, etc.) still
+  comes from `.env` via `env_file`.
+- **`DAGSTER_HOME` is a named volume (`dagster_home`)**, not a bind mount,
+  so dynamic partitions and concurrency pool limits persist across
+  container restarts. It's a separate instance from any host-side
+  `.dagster_home`, but you don't need to set pool limits on it yourself —
+  `entrypoint.sh` runs the four `dagster instance concurrency set`
+  commands (idempotent) on every container start, before launching `dg
+  dev`. `make pools-docker` still exists if you want to change a limit
+  without touching `entrypoint.sh` and rebuilding.
+- **`data/`, `src/`, and `dbt_project/` are bind-mounted** from the host,
+  so scraped/embedded output lands in the same `data/` directory a host
+  run would use, and source/dbt-model edits don't require an image
+  rebuild — use the UI's Reload button (or restart the container) to pick
+  up code changes.
+- **If `PLEXAPI_AUTH_SERVER_BASEURL` in `.env` is `localhost`**, change it
+  to your Plex server's LAN IP (or `host.docker.internal` on
+  Docker Desktop) — `localhost` inside the container refers to the
+  container itself, not the host.
+
 ## Running the pipeline end-to-end
 
-`raw_movies` and `stg_movies` are manual entry points only — nothing
-schedules them, and every asset downstream is partitioned per `imdb_id`,
-so those partitions don't exist until `stg_movies` gives the sensor
-something to register. With `dg dev` running:
+`raw_movies`, `stg_movies`, and `stg_watch_history` are the pipeline's only
+entry points — every asset downstream is partitioned per `imdb_id` (or
+`watch_history_imdb_id`), so those partitions don't exist until the
+respective sensor has something to register. `poll_plex_job` (see
+"Pipeline" above) materializes all three daily at 1am UTC, so in steady
+state nothing further is needed. With `dg dev` running:
 
-1. **Materialize the two entry-point assets first**, either in the UI
-   (select `raw_movies` and `stg_movies` in the asset graph → Materialize)
-   or from the CLI:
+1. **For an immediate first run** rather than waiting for the next 1am
+   tick, materialize the entry points directly, either in the UI (select
+   them in the asset graph → Materialize) or from the CLI:
 
    ```bash
    uv run dg launch --assets raw_movies,stg_movies
+   uv run dg launch --assets stg_watch_history
    ```
 
-   (`make seed` runs this too.)
+   (`make seed` / `make seed-watch-history` run these too.)
 
-2. **Confirm both sensors are `RUNNING`**: Automation → Sensors in the UI,
-   check `sync_imdb_id_partitions` and `default_automation_condition_sensor`.
-   Both default to `RUNNING` on a fresh `DAGSTER_HOME`, but an instance
-   created before the 2026-07-05 fix (see CLAUDE.md) can still have a
-   stale persisted `STOPPED` state that `default_status` won't override —
-   toggle on manually in the UI if so.
+2. **Confirm automation is `RUNNING`**: Automation → Sensors/Schedules in
+   the UI — `sync_imdb_id_partitions`, `sync_watch_history_partitions`,
+   `default_automation_condition_sensor`, and `poll_plex_job_schedule`
+   should all show `RUNNING`. These default to `RUNNING` on a fresh
+   `DAGSTER_HOME`, but an instance created before the 2026-07-05 sensor fix
+   (see CLAUDE.md) can still have a stale persisted `STOPPED` state that
+   `default_status` won't override — toggle on manually if so.
 
-3. **Everything else is automatic.** Within one sensor tick (≤60s),
-   `sync_imdb_id_partitions` registers any new `imdb_id`s and directly
-   requests `synopsis`/`enrichment`/`embeddings` runs for whatever's
-   missing on disk; `embeddings` → `qdrant_collection` cascades via
-   `eager()`. Watch progress on the Runs tab or the asset graph's
-   partition-status coloring.
+3. **Everything else is automatic.** Within one sensor tick,
+   `sync_imdb_id_partitions` (≤600s) and `sync_watch_history_partitions`
+   (≤600s) register any new partitions and directly request whatever's
+   missing on disk; `embeddings`/`watch_history_embeddings` cascade to
+   `qdrant_collection`/`watch_history_qdrant_collection` via `eager()`.
+   Watch progress on the Runs tab or the asset graph's partition-status
+   coloring.
 
-There's no "run everything" button or job by design — step 1 is the only
-manual action required once the environment is set up. Ordinary
-steady-state library changes (movies added or removed in Plex) need no
-further manual intervention.
-
-The watch-history pipeline follows the same pattern with its own manual
-entry point: materialize `stg_watch_history` (not currently included in
-`make seed` / the `raw_movies,stg_movies` launch above — a separate
-command), confirm `sync_watch_history_partitions` is `RUNNING` in
-Automation → Sensors, and everything downstream
-(`watch_history_embeddings` → `watch_history_qdrant_collection`) follows
-automatically within one sensor tick (≤120s).
-
-```bash
-uv run dg launch --assets stg_watch_history
-```
-
-(`make seed-watch-history` runs this too.)
+There's no "run everything" button or job beyond `poll_plex_job` itself —
+step 1 is only needed for an out-of-band first run. Ordinary steady-state
+library changes (movies added/removed, new watch history) need no manual
+intervention once `poll_plex_job` and the sensors above are running.
 
 ## Makefile shortcuts
 
@@ -303,6 +339,8 @@ plain `dg`/`docker compose`/`dagster` command, they just save retyping:
 | `make up` | `docker compose up -d` |
 | `make pools` | the four `dagster instance concurrency set` commands |
 | `make dev` | `uv run dg dev` |
+| `make dev-docker` | `docker compose up --build dagster` |
+| `make pools-docker` | the four `dagster instance concurrency set` commands, run inside the `dagster` container |
 | `make seed` | `uv run dg launch --assets raw_movies,stg_movies` |
 | `make seed-watch-history` | `uv run dg launch --assets stg_watch_history` |
 

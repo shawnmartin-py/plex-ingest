@@ -565,11 +565,41 @@ a SQL transform of data already at rest, so it doesn't fit `stg_movies`'s
 dbt-model shape. Whether dbt takes over the transform step specifically is
 still open, but nothing is blocked on it.
 
+**Scheduling cadence — decided (2026-07-14):** both `sync_imdb_id_partitions`
+and `sync_watch_history_partitions` moved from `60`/`120` seconds to a shared
+`600` seconds. Neither sensor's reactivity was actually tick-rate-bound: a
+backlog is fully queued the tick it's first noticed (Dagster's run queue
+drains it via concurrency-pool slots regardless of how often the sensor
+re-ticks afterward), the two DuckDB source tables
+(`stg_movies`/`stg_watch_history`) only change once a day (via
+`poll_plex_job`, below), and both sensors' backfilled assets share the same
+2-wide `gemini_embeddings` pool, so tightening either sensor's interval
+doesn't increase effective throughput — only the pool width does. Sub-minute
+polling was pure overhead (a DuckDB query plus a file-stat check per
+partition per stage, every tick, almost always a no-op). `600` still reacts
+same-day to the daily upstream refresh and to failed-run retries.
+
+## Daily entry-point schedule — decided (2026-07-14)
+
+`raw_movies`, `stg_movies`, and `stg_watch_history` previously had no
+automation of their own — pure manual entry points, relying on someone to
+run `make seed`/`make seed-watch-history` before the downstream sensors
+had anything to register. Fixed with a single `ScheduleDefinition`
+(`poll_plex_job`, `src/plex_ingest/defs/schedules/poll_plex_daily.py`)
+materializing all three at 1am UTC daily — a schedule rather than a
+sensor or `automation_condition`, since this is a fixed-time trigger with
+no dependency-aware logic needed (see the `dagster-expert` skill's
+"Choosing an automation approach" guidance). `stg_movies` is included
+explicitly by asset-key string, not left to run only via its `raw_movies`
+dependency, since it carries no `automation_condition` of its own and
+would otherwise never re-run after its first materialization.
+
 ### Still open
 
-- **Scheduling cadence** for `sync_watch_history_partitions` —
-  `minimum_interval_seconds=120` (set 2026-07-12) is still a placeholder,
-  not a measured decision.
+- **Schedule timezone** for `poll_plex_job` — currently UTC (Dagster's own
+  default), not a measured local-time decision. No convention existed
+  before this either way — see `sync_watch_history_partitions`'s
+  "Scheduling cadence" item above, the first time cadence came up at all.
 
 ## Frameworks under consideration
 
