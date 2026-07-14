@@ -272,12 +272,16 @@ running `uv run dg dev` on the host:
   comes from `.env` via `env_file`.
 - **`DAGSTER_HOME` is a named volume (`dagster_home`)**, not a bind mount,
   so dynamic partitions and concurrency pool limits persist across
-  container restarts. It's a separate instance from any host-side
-  `.dagster_home`, but you don't need to set pool limits on it yourself —
-  `entrypoint.sh` runs the four `dagster instance concurrency set`
-  commands (idempotent) on every container start, before launching `dg
-  dev`. `make pools-docker` still exists if you want to change a limit
-  without touching `entrypoint.sh` and rebuilding.
+  container restarts. It's a separate *instance* from any host-side
+  `.dagster_home` — **runs/partitions/sensor state made through host `uv
+  run dg dev` won't appear in the Dockerized UI, and vice versa.** Safe to
+  run both at the same time (they're genuinely separate instances), but
+  don't expect them to show the same run history — check whichever one you
+  actually materialized assets through. You don't need to set pool limits
+  on the container instance yourself — `entrypoint.sh` runs the four `dagster instance
+  concurrency set` commands (idempotent) on every container start, before
+  launching `dg dev`. `make pools-docker` still exists if you want to
+  change a limit without touching `entrypoint.sh` and rebuilding.
 - **`data/`, `src/`, and `dbt_project/` are bind-mounted** from the host,
   so scraped/embedded output lands in the same `data/` directory a host
   run would use, and source/dbt-model edits don't require an image

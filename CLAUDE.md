@@ -99,6 +99,15 @@ cross-module imports within this package (PEP 561 marker).
   They're instance state, not part of the asset definitions — re-run this
   after ever recreating `DAGSTER_HOME` from scratch. See README's "Getting
   started" for the exact commands.
+- **The Dockerized `dagster` service (`docker compose up`) uses its own
+  `DAGSTER_HOME`, a separate named Docker volume (`dagster_home`), not a
+  bind mount to the host's `.dagster_home`.** Runs, dynamic partitions, and
+  sensor state made via host `uv run dg dev` are invisible in the
+  Dockerized webserver's UI, and vice versa — this is deliberate (Dagster's
+  daemon/webserver aren't safe to point at one `DAGSTER_HOME` from two live
+  processes at once), not a bug. Pool limits are still handled without a
+  manual step for the container instance — `entrypoint.sh` sets all four on
+  every container start. See README's "Running in Docker".
 - **The `PLEX_INGEST_PARTITION_LIMIT` dev-only safety rail was removed on
   2026-07-06.** It used to cap how many imdb_ids `sync_imdb_id_partitions`
   would ever register as partitions, regardless of library size (previously
