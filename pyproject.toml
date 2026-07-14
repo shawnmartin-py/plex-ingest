@@ -48,7 +48,7 @@ registry_modules = [
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "S", "B", "UP"]
+select = ["E", "F", "W", "I", "S", "B", "UP", "PERF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
