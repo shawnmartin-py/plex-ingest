@@ -10,7 +10,7 @@ from plex_ingest.lib.adapters.gemini_enrichment import DailyQuotaExhaustedError
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
-# hdr_formats, source_platform.
+# hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
     str,
     str,
@@ -23,13 +23,27 @@ CatalogRow = tuple[
     str | None,
     list[str],
     str | None,
+    int | None,
 ]
 
 
 def _catalog_row(
     imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
 ) -> CatalogRow:
-    return (imdb_id, title, year, ["Drama"], 7.5, "PG-13", None, None, None, [], None)
+    return (
+        imdb_id,
+        title,
+        year,
+        ["Drama"],
+        7.5,
+        "PG-13",
+        None,
+        None,
+        None,
+        [],
+        None,
+        None,
+    )
 
 
 def _mock_duckdb(mocker: MockerFixture, row: CatalogRow | None) -> MagicMock:

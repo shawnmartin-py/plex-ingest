@@ -68,8 +68,8 @@ is the only cross-repo data dependency.
 | `type` | string | `movie` (currently the only type synced) |
 | `title` | string | |
 | `year` | int | |
-| `imdb_rating` | float | |
-| `content_rating` | string | e.g. `PG-13` |
+| `imdb_rating` | float | Extracted from Plex's `Rating` list, filtered to the entry whose `image` starts with `imdb://` — same extraction the `watch_history` collection below already used; `media_items` used to blindly take index `[0]` (could mis-tag a Rotten Tomatoes/TMDb score as `imdb_rating` if Plex ever ordered its ratings list differently), fixed to match. |
+| `content_rating` | string | The maturity/age rating, distinct from `imdb_rating` — e.g. `PG-13` (US/MPAA) or `15` / `12A` (UK/BBFC). Plex's raw `contentRating` is locale-tagged whenever a non-US rating board resolved it (`"gb/15"`) — the `gb/`-style prefix is stripped at extraction (`plex_catalog.py`) so this is always the bare rating token. |
 | `description` | string \| null | Plex's own short blurb (`Movie.summary`) — a promotional-length, spoiler-free synopsis, distinct from the long scraped `synopsis` in `page_content` below. Display-only: not embedded, not folded into any `page_content`. |
 | `genres` | string | comma-joined, not a list (`", ".join(genres)`) |
 | `thumb_url` | string \| null | Plex-hosted poster URL |
@@ -78,6 +78,7 @@ is the only cross-repo data dependency.
 | `source_platform` | string \| null | `"Netflix"` or `"Disney+"` — set when the library item is actually a short placeholder clip standing in for a movie only available on that streaming platform (a real file, ~4s long, named `"Title - Year - (Platform).ext"`), not a real download. Mutually exclusive with `video_resolution`. |
 | `embedding_type` | string | `"synopsis"` or `"enriched"` — see below |
 | `section` | string | only present when `embedding_type == "enriched"`: `craft` / `meaning` / `context` |
+| `runtime_minutes` | int \| null | For a real download: derived from Plex's `Media.duration`, rounded to the nearest minute. For a streaming-platform placeholder clip (`source_platform` set): Plex's own duration is meaningless — confirmed empirically against real placeholder items, both top-level `duration` and `media[0].duration` reflect only the ~4s stand-in file, never the real film — so this instead comes from a targeted OMDb API lookup (free, licensed, keyed by `imdb_id`) done only for that subset (`streaming_runtime` asset). `null` when unresolved: `OMDB_API_KEY` isn't configured (a deliberate no-op, not an error — see that asset's docstring), OMDb has no runtime for the title, or the lookup hasn't run yet. |
 
 ### `page_content` by `embedding_type`
 

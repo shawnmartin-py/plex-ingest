@@ -36,7 +36,7 @@ _WAIT_FOR_PIPELINE_TO_SETTLE = (
     automation_condition=_WAIT_FOR_PIPELINE_TO_SETTLE,
     group_name="enrichment",
     kinds={"qdrant"},
-    deps=["embeddings", "synopsis", "enrichment"],
+    deps=["embeddings", "synopsis", "enrichment", "streaming_runtime"],
 )
 def qdrant_collection(
     context: dg.AssetExecutionContext, qdrant: QdrantResource, duckdb: DuckDBResource

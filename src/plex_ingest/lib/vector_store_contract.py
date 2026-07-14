@@ -53,6 +53,7 @@ def build_catalog_metadata(
     video_resolution: VideoResolution | None,
     hdr_formats: list[HdrFormat],
     source_platform: StreamingSource | None,
+    runtime_minutes: int | None,
 ) -> dict[str, object]:
     """Matches plex-rag's MediaItem.to_metadata() exactly — see "metadata fields" in
     vector-store-contract.md. `type` is hardcoded to "movie": stg_movies only ever
@@ -65,7 +66,9 @@ def build_catalog_metadata(
     for placeholder clips in stg_movies.sql, same as `video_resolution`->`None`.
     `description` is Plex's own short blurb (`Movie.summary`) — a display-only field,
     deliberately not folded into `build_synopsis_document_text`'s embedded text,
-    unlike the scraped `synopsis`."""
+    unlike the scraped `synopsis`. `runtime_minutes` is `None` for a streaming
+    placeholder movie whose OMDb lookup hasn't (yet, or ever) resolved — see
+    `stg_movies_reader.fetch_all_movies`'s COALESCE against `stg_streaming_runtime`."""
     return {
         "imdb_id": imdb_id,
         "type": "movie",
@@ -79,6 +82,7 @@ def build_catalog_metadata(
         "video_resolution": video_resolution.value if video_resolution else None,
         "hdr_formats": [fmt.value for fmt in hdr_formats],
         "source_platform": source_platform.value if source_platform else None,
+        "runtime_minutes": runtime_minutes,
     }
 
 
@@ -113,6 +117,7 @@ def build_points(
             movie.video_resolution,
             movie.hdr_formats,
             movie.source_platform,
+            movie.runtime_minutes,
         )
 
         documents = json.loads(path.read_text())

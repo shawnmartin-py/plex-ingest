@@ -14,6 +14,7 @@ resolved as (
         imdb_rating,
         view_count,
         video_resolution,
+        duration_ms,
         hdr_formats,
         synced_at,
         list_filter(guids, g -> g like 'imdb://%')[1] as imdb_guid,
@@ -52,6 +53,14 @@ select
     -- list rather than carrying meaningless HDR/DV flags.
     case when source_platform is null then hdr_formats else [] end as hdr_formats,
     source_platform,
+    -- Same reasoning as video_resolution/hdr_formats: a placeholder clip's duration_ms
+    -- is the ~4s stand-in, not the real film's length, so it's meaningless and dropped.
+    -- The real runtime for streaming-platform movies is resolved separately (OMDb,
+    -- see streaming_runtime asset) and joined in at read time by stg_movies_reader —
+    -- not this table's concern.
+    case
+        when source_platform is null then round(duration_ms / 60000.0)::integer
+    end as runtime_minutes,
     synced_at
 from resolved
 -- Raw layer keeps every Plex item, including watched ones and ones with no IMDb guid;

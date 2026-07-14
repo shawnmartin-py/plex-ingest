@@ -31,6 +31,34 @@ def _first_video_stream(item: Any) -> Any:
     return streams[0] if streams else None
 
 
+def _content_rating(item: Any) -> str | None:
+    """Plex's `contentRating` is locale-tagged (`"gb/15"`, `"gb/12A"`) whenever the
+    library's metadata agent resolved a non-US rating board — bare US-style values
+    (`"R"`, `"PG-13"`) and `"Not Rated"` have no such prefix. Strip it so the contract
+    field is always the bare rating token a UI can display directly, regardless of
+    which board supplied it."""
+    raw: str | None = item.contentRating
+    if raw is None:
+        return None
+    return raw.split("/", 1)[1] if "/" in raw else raw
+
+
+def _imdb_rating(item: Any) -> float | None:
+    """`item.ratings` holds one entry per rating source Plex found (IMDb, Rotten
+    Tomatoes, TMDb, ...) — filtering by `image` is required, not optional: blindly
+    taking index `[0]` (the original bug here) would mis-tag whichever source Plex
+    happened to list first as `imdb_rating`. Same filter `PlexWatchHistory.resolve`
+    already uses for the `watch_history` collection."""
+    return next(
+        (
+            rating.value
+            for rating in item.ratings
+            if rating.image and rating.image.startswith("imdb://")
+        ),
+        None,
+    )
+
+
 class PlexMovieCatalog:
     """Implements the `MovieCatalog` port (see `lib/ports.py`)."""
 
@@ -70,12 +98,12 @@ class PlexMovieCatalog:
                 "rating_key": item.ratingKey,
                 "title": item.title,
                 "year": item.year,
-                "content_rating": item.contentRating,
+                "content_rating": _content_rating(item),
                 "description": item.summary,
                 "thumb_url": item.thumbUrl,
                 "guids": [guid.id for guid in item.guids],
                 "genres": [genre.tag for genre in item.genres],
-                "imdb_rating": item.ratings[0].value if item.ratings else None,
+                "imdb_rating": _imdb_rating(item),
                 "view_count": item.viewCount,
                 "video_resolution": item.media[0].videoResolution
                 if item.media

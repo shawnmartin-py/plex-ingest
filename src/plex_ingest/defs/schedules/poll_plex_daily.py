@@ -4,11 +4,14 @@ poll_plex_job = dg.define_asset_job(
     "poll_plex_job",
     # stg_movies (dbt) depends on raw_movies and carries no automation_condition of
     # its own, so it needs a direct trigger here too, not just raw_movies —
-    # otherwise it would never re-run after the initial materialization. Asset keys
-    # given as strings (rather than imported symbols) since define_asset_job's
-    # selection must be a homogeneous sequence and stg_movies is a dbt-generated
-    # asset, not a plain @dg.asset function to import.
-    selection=["raw_movies", "stg_movies", "stg_watch_history"],
+    # otherwise it would never re-run after the initial materialization. Same reason
+    # streaming_runtime is listed here: it depends on stg_movies but has no
+    # automation_condition of its own either (see its docstring — deliberately
+    # unpartitioned, so nothing else triggers it). Asset keys given as strings
+    # (rather than imported symbols) since define_asset_job's selection must be a
+    # homogeneous sequence and stg_movies is a dbt-generated asset, not a plain
+    # @dg.asset function to import.
+    selection=["raw_movies", "stg_movies", "stg_watch_history", "streaming_runtime"],
 )
 
 # UTC — this repo has no established local-timezone convention yet (see

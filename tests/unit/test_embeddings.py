@@ -9,7 +9,7 @@ from plex_ingest.defs.assets.embeddings import embeddings
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
-# hdr_formats, source_platform.
+# hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
     str,
     str,
@@ -22,6 +22,7 @@ CatalogRow = tuple[
     str | None,
     list[str],
     str | None,
+    int | None,
 ]
 
 
@@ -46,6 +47,7 @@ def _catalog_row(
         None,
         None,
         [],
+        None,
         None,
     )
 

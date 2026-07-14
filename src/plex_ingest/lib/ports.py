@@ -63,6 +63,10 @@ class MovieCatalog(Protocol):
     def fetch_raw_movies(self) -> list[dict[str, Any]]: ...
 
 
+class RuntimeLookup(Protocol):
+    def fetch_runtime_minutes(self, imdb_id: str) -> int | None: ...
+
+
 @dataclass(frozen=True)
 class WatchHistoryEntry:
     title: str

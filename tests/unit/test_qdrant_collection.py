@@ -11,7 +11,7 @@ from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
 
 # Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
-# hdr_formats, source_platform.
+# hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
     str,
     str,
@@ -24,6 +24,7 @@ CatalogRow = tuple[
     str | None,
     list[str],
     str | None,
+    int | None,
 ]
 
 
@@ -33,6 +34,7 @@ def _catalog_row(
     video_resolution: str | None = None,
     hdr_formats: list[str] | None = None,
     source_platform: str | None = None,
+    runtime_minutes: int | None = 104,
 ) -> CatalogRow:
     return (
         imdb_id,
@@ -46,6 +48,7 @@ def _catalog_row(
         video_resolution,
         hdr_formats if hdr_formats is not None else [],
         source_platform,
+        runtime_minutes,
     )
 
 
@@ -149,6 +152,32 @@ def test_points_carry_full_catalog_metadata(
     assert metadata["video_resolution"] is None
     assert metadata["hdr_formats"] == []
     assert metadata["source_platform"] is None
+    assert metadata["runtime_minutes"] == 104
+
+
+def test_points_carry_null_runtime_for_an_unresolved_streaming_placeholder(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    import plex_ingest.defs.assets.qdrant_collection as qdrant_collection_module
+
+    mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
+    embeddings_dir = tmp_path / "embeddings"
+    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+
+    mock_qdrant = mocker.MagicMock()
+    mock_qdrant.collection = "media_items"
+    mock_qdrant.point_count.return_value = 1
+    mock_duckdb = _mock_duckdb(
+        mocker,
+        [_catalog_row("tt0001", source_platform="Netflix", runtime_minutes=None)],
+    )
+
+    qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
+
+    (points,), _ = mock_qdrant.upsert_points.call_args
+    metadata = points[0][3]
+    assert metadata["source_platform"] == "Netflix"
+    assert metadata["runtime_minutes"] is None
 
 
 def test_points_carry_video_resolution_for_a_real_download(
