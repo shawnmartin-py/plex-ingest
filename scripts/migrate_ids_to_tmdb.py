@@ -17,25 +17,33 @@ What it does:
    tt-stem in embeddings/ makes every future qdrant_collection rebuild raise (see
    build_points), and the tmdb-keyed sensor can never prune it.
 2. Rebuilds stg_watch_history with the tmdb-keyed schema. The mapping here cannot
-   come from stg_movies (watched movies are excluded by its view_count = 0 rule), so
-   each row is re-resolved against Plex Discover, matched by its known imdb_id guid
-   (falling back to exact year). Unresolvable rows are dropped and their embeddings
-   file quarantined, with a report. embeddings/watch_history/ files are renamed with
-   the resolved mapping.
+   come from stg_movies (watched movies are excluded by its view_count = 0 rule).
+   Sources tried per row, in order: (a) raw_movies' own guids — the raw layer keeps
+   watched items too, so a watched movie still in the library maps locally with no
+   network at all; (b) a pre-verified {imdb_id: tmdb_id} JSON file passed via
+   --watch-history-mapping (for when Plex is unreachable — e.g. built from Wikidata's
+   exact imdb-id property and title-checked by hand); (c) Plex Discover, matched by
+   the row's known imdb_id guid (falling back to exact year). Unresolvable rows are
+   dropped and their embeddings file quarantined, with a report.
+   embeddings/watch_history/ files are renamed with the resolved mapping.
 
 Idempotent: stems already in the tmdb keyspace are skipped, and the table rebuild is
 skipped when stg_watch_history already has a tmdb_id column. Aborts before touching
 anything if two source files would rename onto the same target.
 
 Usage:
-    uv run python scripts/migrate_ids_to_tmdb.py [--dry-run]
+    uv run python scripts/migrate_ids_to_tmdb.py [--dry-run] \
+        [--watch-history-mapping mapping.json]
 
 Needs PLEXAPI_AUTH_SERVER_BASEURL / PLEXAPI_AUTH_SERVER_TOKEN in the environment for
-step 2 (same vars the pipeline itself uses — `set -a; source .env` first if needed).
+step 2's Discover fallback (same vars the pipeline itself uses — `set -a; source
+.env` first if needed); rows already covered by raw_movies or the mapping file never
+touch Plex, and Plex being unreachable only aborts step 2, never step 1.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -199,35 +207,80 @@ def _resolve_tmdb_id(account: Any, title: str, year: int, imdb_id: str) -> str |
     return _guid(match, "tmdb://")
 
 
-def migrate_watch_history(conn: DuckDBPyConnection, *, dry_run: bool) -> None:
-    if not _watch_history_needs_migration(conn):
-        return
+def _raw_movies_mapping(conn: DuckDBPyConnection) -> dict[str, str]:
+    """imdb -> tmdb straight from raw_movies' guids, with NO view_count/watched
+    filter — the raw layer keeps every library item, so a watched movie still in the
+    library resolves locally without any network call."""
+    rows = conn.execute(
+        "SELECT"
+        "  regexp_extract(list_filter(guids, g -> g LIKE 'imdb://%')[1],"
+        "                 'imdb://(.*)', 1),"
+        "  regexp_extract(list_filter(guids, g -> g LIKE 'tmdb://%')[1],"
+        "                 'tmdb://(.*)', 1) "
+        "FROM raw_movies "
+        "WHERE len(list_filter(guids, g -> g LIKE 'imdb://%')) > 0"
+        "  AND len(list_filter(guids, g -> g LIKE 'tmdb://%')) > 0"
+    ).fetchall()
+    return dict(rows)
 
+
+def _discover_account() -> Any | None:
     from plexapi.server import PlexServer
 
     base_url = os.environ.get("PLEXAPI_AUTH_SERVER_BASEURL")
     token = os.environ.get("PLEXAPI_AUTH_SERVER_TOKEN")
     if not base_url or not token:
-        print(
-            "\nABORTING watch-history migration: PLEXAPI_AUTH_SERVER_BASEURL / "
-            "PLEXAPI_AUTH_SERVER_TOKEN not set (catalog files above are already "
-            "handled — re-run with the env set to finish this part)."
-        )
-        sys.exit(1)
-    server = PlexServer(baseurl=base_url, token=token)  # type: ignore[no-untyped-call]
-    account = server.myPlexAccount()  # type: ignore[no-untyped-call]
+        return None
+    try:
+        server = PlexServer(baseurl=base_url, token=token)  # type: ignore[no-untyped-call]
+        return server.myPlexAccount()  # type: ignore[no-untyped-call]
+    except Exception as e:  # noqa: BLE001 — any connectivity failure means "no Discover", never a crash mid-migration
+        print(f"  (Plex unreachable, Discover fallback unavailable: {e})")
+        return None
+
+
+def migrate_watch_history(
+    conn: DuckDBPyConnection, *, dry_run: bool, mapping_file: str | None
+) -> None:
+    if not _watch_history_needs_migration(conn):
+        return
+
+    supplied_mapping: dict[str, str] = {}
+    if mapping_file:
+        supplied_mapping = json.loads(Path(mapping_file).read_text())
+        print(f"\nloaded {len(supplied_mapping)} pair(s) from {mapping_file}")
+    local_mapping = _raw_movies_mapping(conn)
 
     rows = conn.execute(
         "SELECT imdb_id, title, year, genres, imdb_rating, summary, last_viewed_at "
         "FROM stg_watch_history"
     ).fetchall()
-    print(f"\nstg_watch_history: {len(rows)} row(s) to re-resolve via Plex Discover")
+    print(f"\nstg_watch_history: {len(rows)} row(s) to re-key")
+
+    # Discover is only needed for rows the local/supplied mappings don't cover —
+    # connect lazily so a fully-covered migration works with Plex down entirely.
+    needs_discover = [
+        r for r in rows if r[0] not in local_mapping and r[0] not in supplied_mapping
+    ]
+    account = _discover_account() if needs_discover else None
+    if needs_discover and account is None:
+        print(
+            f"ABORTING watch-history migration: {len(needs_discover)} row(s) have no "
+            "raw_movies/--watch-history-mapping entry and Plex Discover is not "
+            "available (catalog files in step 1 are unaffected — re-run when Plex is "
+            "reachable, or supply --watch-history-mapping):"
+        )
+        for r in needs_discover:
+            print(f"  {r[0]} ({r[1]}, {r[2]})")
+        sys.exit(1)
 
     resolved_rows: list[tuple[Any, ...]] = []
     mapping: dict[str, str] = {}
     dropped: list[tuple[str, str]] = []
     for imdb_id, title, year, genres, imdb_rating, summary, last_viewed_at in rows:
-        tmdb_id = _resolve_tmdb_id(account, title, year, imdb_id)
+        tmdb_id = local_mapping.get(imdb_id) or supplied_mapping.get(imdb_id)
+        if tmdb_id is None:
+            tmdb_id = _resolve_tmdb_id(account, title, year, imdb_id)
         if tmdb_id is None or tmdb_id in mapping.values():
             reason = "no tmdb match" if tmdb_id is None else f"duplicate of {tmdb_id}"
             print(f"  DROP {imdb_id} ({title}, {year}): {reason}")
@@ -305,10 +358,14 @@ def main() -> None:
     if dry_run:
         print("DRY RUN — nothing will be modified\n")
 
+    mapping_file: str | None = None
+    if "--watch-history-mapping" in sys.argv:
+        mapping_file = sys.argv[sys.argv.index("--watch-history-mapping") + 1]
+
     conn = duckdb.connect(DUCKDB_PATH, read_only=dry_run)
     try:
         migrate_catalog_files(conn, dry_run=dry_run)
-        migrate_watch_history(conn, dry_run=dry_run)
+        migrate_watch_history(conn, dry_run=dry_run, mapping_file=mapping_file)
     finally:
         conn.close()
 
