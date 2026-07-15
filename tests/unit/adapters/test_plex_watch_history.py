@@ -118,6 +118,8 @@ def test_resolve_returns_none_when_no_candidate_matches_exact_date(
 def test_resolve_returns_none_when_matched_candidate_has_no_imdb_guid(
     mocker: MockerFixture,
 ) -> None:
+    """Both guids are required (mirrors stg_movies' business rule) — a tmdb-only
+    candidate can't be scraped/OMDb-resolved downstream."""
     adapter = PlexWatchHistory(
         base_url="http://localhost:32400",
         token="fake-token",  # noqa: S106
@@ -136,7 +138,30 @@ def test_resolve_returns_none_when_matched_candidate_has_no_imdb_guid(
     assert result is None
 
 
-def test_resolve_extracts_imdb_id_genres_and_imdb_scale_rating(
+def test_resolve_returns_none_when_matched_candidate_has_no_tmdb_guid(
+    mocker: MockerFixture,
+) -> None:
+    """tmdb_id is the pipeline's primary key — an imdb-only candidate has no
+    partition key to live under."""
+    adapter = PlexWatchHistory(
+        base_url="http://localhost:32400",
+        token="fake-token",  # noqa: S106
+        movie_library="Movies",
+    )
+    mock_account = mocker.MagicMock()
+    mock_account.searchDiscover.return_value = [
+        _candidate("Kika", date(1993, 10, 29), ["imdb://tt0107315"], ["Comedy"], []),
+    ]
+    mock_server = mocker.MagicMock()
+    mock_server.myPlexAccount.return_value = mock_account
+    adapter._server = mocker.MagicMock(return_value=mock_server)  # type: ignore[method-assign]
+
+    result = adapter.resolve("Kika", date(1993, 10, 29))
+
+    assert result is None
+
+
+def test_resolve_extracts_tmdb_id_imdb_id_genres_and_imdb_scale_rating(
     mocker: MockerFixture,
 ) -> None:
     adapter = PlexWatchHistory(
@@ -166,6 +191,7 @@ def test_resolve_extracts_imdb_id_genres_and_imdb_scale_rating(
     result = adapter.resolve("Kika", date(1993, 10, 29))
 
     assert result is not None
+    assert result.tmdb_id == "456"
     assert result.imdb_id == "tt0107315"
     assert result.imdb_rating == 6.5
     assert result.genres == ["Comedy", "Drama"]
@@ -186,7 +212,7 @@ def test_resolve_imdb_rating_is_none_when_no_imdb_rating_present(
         _candidate(
             "Kika",
             date(1993, 10, 29),
-            guids=["imdb://tt0107315"],
+            guids=["imdb://tt0107315", "tmdb://456"],
             genres=["Comedy"],
             ratings=[("rottentomatoes://image.rating.ripe", 8.0)],
         ),

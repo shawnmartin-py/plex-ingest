@@ -4,7 +4,7 @@ import uuid
 import dagster as dg
 from dagster_duckdb import DuckDBResource
 
-from plex_ingest.defs.partitions import imdb_id_partitions
+from plex_ingest.defs.partitions import tmdb_id_partitions
 from plex_ingest.defs.resources.partition_json_io_manager import (
     EMBEDDINGS_IO_MANAGER,
     ENRICHMENT_IO_MANAGER,
@@ -19,7 +19,7 @@ _STAGE_ASSET_KEYS = (
     dg.AssetKey("embeddings"),
 )
 
-_SENSOR_NAME = "sync_imdb_id_partitions"
+_SENSOR_NAME = "sync_tmdb_id_partitions"
 
 # A custom tag carrying the *logical* identity of a backfill request (partition +
 # missing-asset signature, or the qdrant rebuild's own signature) -- deliberately
@@ -45,12 +45,12 @@ def _in_flight_signatures(instance: dg.DagsterInstance) -> set[str]:
     return in_flight_signatures(instance, _SENSOR_NAME, _BACKFILL_SIGNATURE_TAG_KEY)
 
 
-def _delete_partition_files(imdb_id: str) -> None:
+def _delete_partition_files(tmdb_id: str) -> None:
     for io_manager in _STAGE_IO_MANAGERS:
-        io_manager.path_for(imdb_id).unlink(missing_ok=True)
+        io_manager.path_for(tmdb_id).unlink(missing_ok=True)
 
 
-def _missing_stage_assets(imdb_id: str) -> list[dg.AssetKey]:
+def _missing_stage_assets(tmdb_id: str) -> list[dg.AssetKey]:
     """Which of synopsis/enrichment/embeddings have never been materialized for this
     partition, checked directly against on-disk state. This is what actually triggers
     their first materialization now — synopsis/enrichment carry no automation_condition
@@ -65,7 +65,7 @@ def _missing_stage_assets(imdb_id: str) -> list[dg.AssetKey]:
         for asset_key, io_manager in zip(
             _STAGE_ASSET_KEYS, _STAGE_IO_MANAGERS, strict=True
         )
-        if not io_manager.path_for(imdb_id).exists()
+        if not io_manager.path_for(tmdb_id).exists()
     ]
 
 
@@ -84,19 +84,19 @@ def compute_partition_diff(
     default_status=dg.DefaultSensorStatus.RUNNING,
     asset_selection=[*_STAGE_ASSET_KEYS, dg.AssetKey("qdrant_collection")],
 )
-def sync_imdb_id_partitions(
+def sync_tmdb_id_partitions(
     context: dg.SensorEvaluationContext, duckdb: DuckDBResource
 ) -> dg.SensorResult:
-    """Keeps the imdb_id dynamic partition set (shared by synopsis/enrichment/
+    """Keeps the tmdb_id dynamic partition set (shared by synopsis/enrichment/
     embeddings) in sync with stg_movies, and is the sole trigger for
     synopsis/enrichment's first materialization (see `_missing_stage_assets`) — they
     carry no automation_condition of their own, since AutomationCondition.on_missing()
     (and eager()) cannot be relied on for this: a partition already missing at the
     automation-condition cursor's very first evaluation never becomes "newly missing"
     again and is stuck forever (see docs/pipeline-design.md's "Known gaps found
-    during dev-subset verification", item 2). A new imdb_id gets a
+    during dev-subset verification", item 2). A new tmdb_id gets a
     partition added and, like every other desired partition, is checked against on-disk
-    state and backfilled directly if anything is missing. An imdb_id no longer in
+    state and backfilled directly if anything is missing. A tmdb_id no longer in
     stg_movies gets its partition removed *and* its on-disk synopsis/enrichment/
     embeddings files deleted, so the next qdrant_collection rebuild naturally excludes
     it. qdrant_collection is requested directly only when a removal happened: file
@@ -116,34 +116,34 @@ def sync_imdb_id_partitions(
     `_BACKFILL_SIGNATURE_TAG_KEY` for why."""
     with duckdb.get_connection() as conn:
         current_ids = {
-            row[0] for row in conn.execute("SELECT imdb_id FROM stg_movies").fetchall()
+            row[0] for row in conn.execute("SELECT tmdb_id FROM stg_movies").fetchall()
         }
 
     desired_ids = current_ids
 
     registered_ids = set(
-        imdb_id_partitions.get_partition_keys(dynamic_partitions_store=context.instance)
+        tmdb_id_partitions.get_partition_keys(dynamic_partitions_store=context.instance)
     )
     new_ids, removed_ids = compute_partition_diff(desired_ids, registered_ids)
 
-    for imdb_id in removed_ids:
-        _delete_partition_files(imdb_id)
+    for tmdb_id in removed_ids:
+        _delete_partition_files(tmdb_id)
 
     dynamic_partitions_requests: list[
         dg.AddDynamicPartitionsRequest | dg.DeleteDynamicPartitionsRequest
     ] = []
     if new_ids:
         dynamic_partitions_requests.append(
-            imdb_id_partitions.build_add_request(sorted(new_ids))
+            tmdb_id_partitions.build_add_request(sorted(new_ids))
         )
     if removed_ids:
         dynamic_partitions_requests.append(
-            imdb_id_partitions.build_delete_request(sorted(removed_ids))
+            tmdb_id_partitions.build_delete_request(sorted(removed_ids))
         )
 
     if new_ids or removed_ids:
         context.log.info(
-            f"imdb_id partitions: +{len(new_ids)} -{len(removed_ids)} "
+            f"tmdb_id partitions: +{len(new_ids)} -{len(removed_ids)} "
             f"(desired total: {len(desired_ids)})"
         )
 
@@ -153,12 +153,12 @@ def sync_imdb_id_partitions(
     in_flight = _in_flight_signatures(context.instance)
 
     run_requests: list[dg.RunRequest] = []
-    for imdb_id in sorted(desired_ids):
-        missing_assets = _missing_stage_assets(imdb_id)
+    for tmdb_id in sorted(desired_ids):
+        missing_assets = _missing_stage_assets(tmdb_id)
         if not missing_assets:
             continue
         missing_signature = "-".join(sorted(k.to_user_string() for k in missing_assets))
-        backfill_signature = f"{imdb_id}:{missing_signature}"
+        backfill_signature = f"{tmdb_id}:{missing_signature}"
         if backfill_signature in in_flight:
             continue
         run_requests.append(
@@ -175,7 +175,7 @@ def sync_imdb_id_partitions(
                 # writeup. The check's code is left in place; re-enable by removing
                 # this once a search-capable judge model replaces qwen3-32b.
                 asset_check_keys=[],
-                partition_key=imdb_id,
+                partition_key=tmdb_id,
                 tags={_BACKFILL_SIGNATURE_TAG_KEY: backfill_signature},
             )
         )
@@ -209,5 +209,5 @@ default_automation_condition_sensor = dg.AutomationConditionSensorDefinition(
 )
 
 defs = dg.Definitions(
-    sensors=[sync_imdb_id_partitions, default_automation_condition_sensor]
+    sensors=[sync_tmdb_id_partitions, default_automation_condition_sensor]
 )

@@ -29,13 +29,13 @@ def watch_history_qdrant_collection(
     duckdb: DuckDBResource,
 ) -> dg.MaterializeResult:
     """Full rebuild of the `watch_history` Qdrant collection from every
-    embeddings/watch_history/{imdb_id}.json currently on disk, joined against
+    embeddings/watch_history/{tmdb_id}.json currently on disk, joined against
     `stg_watch_history` rows filtered to the last `_RELEVANCE_WINDOW_DAYS` --
     mirrors `qdrant_collection`'s "delete+reinsert is cheap, so the simplest correct
     thing is also the self-correcting one" philosophy (see that asset's docstring).
 
     Two things make this rebuild self-correcting on different axes than
-    `qdrant_collection`'s: (1) an imdb_id whose embedding exists but whose
+    `qdrant_collection`'s: (1) a tmdb_id whose embedding exists but whose
     `stg_watch_history` row has aged past the window is simply excluded from this
     run's points -- no partition removal, no file deletion, the cached embedding
     stays on disk untouched for a future run where a rewatch brings it back into the
@@ -45,7 +45,7 @@ def watch_history_qdrant_collection(
     weighting fresh on every run without needing the embeddings cache to change.
 
     `sync_watch_history_partitions` still requests this asset directly whenever a
-    new embedding gets backfilled, the same cold-start gap `sync_imdb_id_partitions`
+    new embedding gets backfilled, the same cold-start gap `sync_tmdb_id_partitions`
     covers for `qdrant_collection` -- see that sensor's docstring."""
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(
         days=_RELEVANCE_WINDOW_DAYS
@@ -53,8 +53,8 @@ def watch_history_qdrant_collection(
     with duckdb.get_connection() as conn:
         watch_history = fetch_all_watch_history(conn)
     in_window_ids = {
-        imdb_id
-        for imdb_id, row in watch_history.items()
+        tmdb_id
+        for tmdb_id, row in watch_history.items()
         if row.last_viewed_at >= cutoff
     }
 

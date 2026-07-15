@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 # value, and a real download's row simply has no stg_streaming_runtime match, so
 # COALESCE just passes m.runtime_minutes through unchanged.
 _COLUMNS = (
-    "m.imdb_id, m.title, m.year, m.genres, m.imdb_rating, m.content_rating, "
-    "m.description, m.thumb_url, m.video_resolution, m.hdr_formats, "
+    "m.tmdb_id, m.imdb_id, m.title, m.year, m.genres, m.imdb_rating, "
+    "m.content_rating, m.description, m.thumb_url, m.video_resolution, m.hdr_formats, "
     "m.source_platform, "
     "COALESCE(m.runtime_minutes, sr.runtime_minutes) AS runtime_minutes"
 )
@@ -41,6 +41,7 @@ _FROM = (
 
 @dataclass(frozen=True)
 class MovieCatalogRow:
+    tmdb_id: str
     imdb_id: str
     title: str
     year: int
@@ -55,8 +56,9 @@ class MovieCatalogRow:
     runtime_minutes: int | None
 
 
-def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
+def _row_to_movie(tmdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
     (
+        imdb_id,
         title,
         year,
         genres,
@@ -78,9 +80,10 @@ def _row_to_movie(imdb_id: str, row: tuple[Any, ...]) -> MovieCatalogRow:
             StreamingSource(source_platform_raw) if source_platform_raw else None
         )
     except ValueError as e:
-        msg = f"stg_movies row for imdb_id={imdb_id!r} has an unrecognized value: {e}"
+        msg = f"stg_movies row for tmdb_id={tmdb_id!r} has an unrecognized value: {e}"
         raise ValueError(msg) from e
     return MovieCatalogRow(
+        tmdb_id=tmdb_id,
         imdb_id=imdb_id,
         title=title,
         year=year,
@@ -104,23 +107,23 @@ def _ensure_streaming_runtime_table(conn: DuckDBPyConnection) -> None:
     conn.execute(_CREATE_STREAMING_RUNTIME_TABLE_SQL)
 
 
-def fetch_movie(conn: DuckDBPyConnection, imdb_id: str) -> MovieCatalogRow:
-    """The `stg_movies` row for `imdb_id`. Raises if it's missing — every asset that
+def fetch_movie(conn: DuckDBPyConnection, tmdb_id: str) -> MovieCatalogRow:
+    """The `stg_movies` row for `tmdb_id`. Raises if it's missing — every asset that
     reads this table by partition key needs the same "must exist" guarantee."""
     _ensure_streaming_runtime_table(conn)
     row = conn.execute(
-        f"SELECT {_COLUMNS} {_FROM} WHERE m.imdb_id = ?",  # noqa: S608 — _COLUMNS/_FROM are module constants, not user input
-        [imdb_id],
+        f"SELECT {_COLUMNS} {_FROM} WHERE m.tmdb_id = ?",  # noqa: S608 — _COLUMNS/_FROM are module constants, not user input
+        [tmdb_id],
     ).fetchone()
     if row is None:
-        msg = f"No stg_movies row for imdb_id={imdb_id!r}"
+        msg = f"No stg_movies row for tmdb_id={tmdb_id!r}"
         raise ValueError(msg)
-    return _row_to_movie(imdb_id, row)
+    return _row_to_movie(tmdb_id, row)
 
 
 def fetch_all_movies(conn: DuckDBPyConnection) -> dict[str, MovieCatalogRow]:
-    """Every `stg_movies` row, keyed by imdb_id — used by qdrant_collection's full
-    rebuild, which needs the whole catalog rather than one imdb_id at a time."""
+    """Every `stg_movies` row, keyed by tmdb_id — used by qdrant_collection's full
+    rebuild, which needs the whole catalog rather than one tmdb_id at a time."""
     _ensure_streaming_runtime_table(conn)
     return {
         row[0]: _row_to_movie(row[0], row)

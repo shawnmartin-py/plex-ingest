@@ -38,6 +38,7 @@ def test_resolve_delegates_to_adapter(mocker: MockerFixture) -> None:
     )
     mock_adapter = mocker.MagicMock()
     expected = ResolvedWatchedMovie(
+        tmdb_id="456",
         imdb_id="tt0107315",
         title="Kika",
         year=1993,

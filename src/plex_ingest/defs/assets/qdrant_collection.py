@@ -14,8 +14,8 @@ _ONLY_EMBEDDINGS = dg.AssetSelection.assets("embeddings")
 # inspects qdrant_collection's *direct* deps (embeddings), so during a large backfill it
 # still fires a full rebuild after every single embeddings partition, each one stale
 # within moments as more partitions land — a real, not hypothetical, problem, since
-# sync_imdb_id_partitions drives synopsis/enrichment/embeddings across potentially
-# hundreds of imdb_id partitions at very different pipeline stages simultaneously.
+# sync_tmdb_id_partitions drives synopsis/enrichment/embeddings across potentially
+# hundreds of tmdb_id partitions at very different pipeline stages simultaneously.
 # synopsis/enrichment are added as structural `deps=` purely so any_deps_in_progress()
 # can see them (they're not read by this asset — embeddings_dir and duckdb are the
 # actual inputs). The trigger event and the missing-dep guard stay scoped to embeddings
@@ -41,7 +41,7 @@ _WAIT_FOR_PIPELINE_TO_SETTLE = (
 def qdrant_collection(
     context: dg.AssetExecutionContext, qdrant: QdrantResource, duckdb: DuckDBResource
 ) -> dg.MaterializeResult:
-    """Full rebuild of the Qdrant collection from every embeddings/{imdb_id}.json
+    """Full rebuild of the Qdrant collection from every embeddings/{tmdb_id}.json
     currently on disk. Deliberately unpartitioned and delete+reinsert rather than
     incremental per-movie upserts: loading already-computed data into Qdrant is cheap,
     so the simplest correct thing is also the self-correcting one — a movie pruned
@@ -55,7 +55,7 @@ def qdrant_collection(
 
     A pure removal (no accompanying addition) has no tracked embeddings update for
     eager() to react to, since the sensor's file deletion is a direct filesystem write,
-    invisible to Dagster's materialization tracking — so sync_imdb_id_partitions
+    invisible to Dagster's materialization tracking — so sync_tmdb_id_partitions
     requests a run of this asset directly whenever it removes a partition, rather than
     relying on eager() alone. See docs/pipeline-design.md's "Known gaps found during
     dev-subset verification".

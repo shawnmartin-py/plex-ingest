@@ -5,7 +5,7 @@ from dagster_duckdb import DuckDBResource
 
 from plex_ingest.defs.resources.plex_watch_history import PlexWatchHistoryResource
 
-_Row = tuple[str, str, int, list[str], float | None, str, datetime]
+_Row = tuple[str, str, str, int, list[str], float | None, str, datetime]
 
 TABLE_NAME = "stg_watch_history"
 
@@ -14,14 +14,15 @@ TABLE_NAME = "stg_watch_history"
 # as this pipeline runs more often than the window is wide, every watched
 # title gets captured (and cached — see the partition-sync sensor) before it
 # would otherwise age out of view. Widening this only affects how much gets
-# re-resolved per run, not what's already cached: once an imdb_id has a
+# re-resolved per run, not what's already cached: once a tmdb_id has a
 # partition, the sync sensor never re-embeds it regardless of whether a later
 # run's window still includes it.
 _WINDOW_DAYS = 60
 
 _CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    imdb_id VARCHAR PRIMARY KEY,
+    tmdb_id VARCHAR PRIMARY KEY,
+    imdb_id VARCHAR NOT NULL,
     title VARCHAR NOT NULL,
     year INTEGER NOT NULL,
     genres VARCHAR[] NOT NULL,
@@ -31,16 +32,17 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 )
 """
 
-# Upsert, not overwrite: a row already in the table for an imdb_id must survive a run
+# Upsert, not overwrite: a row already in the table for a tmdb_id must survive a run
 # whose Plex fetch window no longer includes it (see _WINDOW_DAYS) -- the
 # watch_history_embeddings/watch_history_qdrant_collection assets need this table to
-# still have the row for any imdb_id that ever got a partition, even long after it aged
+# still have the row for any tmdb_id that ever got a partition, even long after it aged
 # out of the fetch window, since partitions are add-only (see the sync sensor) and never
 # force a re-embed. The WHERE guards against an out-of-order/stale re-resolution
 # clobbering a newer last_viewed_at with an older one.
 _UPSERT_SQL = f"""
-INSERT INTO {TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (imdb_id) DO UPDATE SET
+INSERT INTO {TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tmdb_id) DO UPDATE SET
+    imdb_id = excluded.imdb_id,
     title = excluded.title,
     year = excluded.year,
     genres = excluded.genres,
@@ -63,21 +65,21 @@ def stg_watch_history(
     all-time history (see `_WINDOW_DAYS`) to keep each run's Discover API cost small.
 
     Unlike `raw_movies`, this is an **upsert into an accumulating table, not a full
-    overwrite** — a row already present for an imdb_id must survive a later run whose
+    overwrite** — a row already present for a tmdb_id must survive a later run whose
     fetch window no longer includes it. Partitions here are add-only (see the sync
     sensor) precisely so a cached embedding never needs to be recomputed just because
     its title aged out of the window; that only holds if this table keeps the row
     around for `watch_history_embeddings`/`watch_history_qdrant_collection` to still
     read. See docs/pipeline-design.md's "Watch-history diversity-recommender pipeline".
 
-    Resolution (title+date -> imdb_id/genres/summary/rating, via
+    Resolution (title+date -> tmdb_id/imdb_id/genres/summary/rating, via
     `PlexWatchHistoryResource`) happens here rather than in a downstream SQL
     transform, since it needs a live Plex Discover API call per title — not
-    SQL-shaped, unlike `stg_movies`'s dbt-based `imdb_id` resolution from raw
+    SQL-shaped, unlike `stg_movies`'s dbt-based guid resolution from raw
     `guids`. Whether a dbt layer belongs on top of this table for further
     transformation is still open — see docs/pipeline-design.md.
 
-    Deduplicates within this run's fetch by `imdb_id`, keeping the most recent
+    Deduplicates within this run's fetch by `tmdb_id`, keeping the most recent
     `viewed_at` — Plex history contains one row per playback, so a rewatched movie
     appears multiple times; the upsert's `WHERE` clause applies the same
     keep-the-newest rule across runs. A title that fails to resolve (see
@@ -89,7 +91,7 @@ def stg_watch_history(
         if entry.viewed_at >= cutoff.replace(tzinfo=None)
     ]
 
-    latest_by_imdb_id: dict[str, _Row] = {}
+    latest_by_tmdb_id: dict[str, _Row] = {}
     skipped = 0
     for entry in history:
         resolved = plex_watch_history.resolve(
@@ -103,10 +105,11 @@ def stg_watch_history(
             skipped += 1
             continue
 
-        existing = latest_by_imdb_id.get(resolved.imdb_id)
-        if existing is not None and existing[6] >= entry.viewed_at:
+        existing = latest_by_tmdb_id.get(resolved.tmdb_id)
+        if existing is not None and existing[7] >= entry.viewed_at:
             continue
-        latest_by_imdb_id[resolved.imdb_id] = (
+        latest_by_tmdb_id[resolved.tmdb_id] = (
+            resolved.tmdb_id,
             resolved.imdb_id,
             resolved.title,
             resolved.year,
@@ -118,15 +121,15 @@ def stg_watch_history(
 
     with duckdb.get_connection() as conn:
         conn.execute(_CREATE_TABLE_SQL)
-        if latest_by_imdb_id:
-            conn.executemany(_UPSERT_SQL, list(latest_by_imdb_id.values()))
+        if latest_by_tmdb_id:
+            conn.executemany(_UPSERT_SQL, list(latest_by_tmdb_id.values()))
         count_row = conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}").fetchone()  # noqa: S608
         if count_row is None:
             raise RuntimeError(f"COUNT(*) on {TABLE_NAME!r} returned no row")
         total_row_count = count_row[0]
 
     context.log.info(
-        f"Upserted {len(latest_by_imdb_id)} row(s) from this run's window into "
+        f"Upserted {len(latest_by_tmdb_id)} row(s) from this run's window into "
         f"{TABLE_NAME!r} ({total_row_count} total) in {duckdb.database} "
         f"({skipped} unresolved entr{'y' if skipped == 1 else 'ies'} skipped)"
     )
@@ -135,7 +138,7 @@ def stg_watch_history(
         metadata={
             "table": TABLE_NAME,
             "path": duckdb.database,
-            "upserted_row_count": len(latest_by_imdb_id),
+            "upserted_row_count": len(latest_by_tmdb_id),
             "total_row_count": total_row_count,
             "skipped": skipped,
         }

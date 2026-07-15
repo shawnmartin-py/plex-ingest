@@ -1,6 +1,6 @@
 """Shared duplicate-request-prevention helper for partition-sync sensors.
 
-Extracted from `sync_imdb_id_partitions.py`, which is the sensor with the full
+Extracted from `sync_tmdb_id_partitions.py`, which is the sensor with the full
 history of *why* this exists: Dagster's own `RunRequest.run_key` dedup is permanent
 and status-agnostic, so relying on it means any run failure (a crash, a killed
 daemon, a hard-failed daily quota) silently and permanently strands whatever that

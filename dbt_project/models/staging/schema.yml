@@ -4,6 +4,10 @@ version: 2
 models:
   - name: stg_movies
     columns:
+      - name: tmdb_id
+        data_tests:
+          - not_null
+          - unique
       - name: imdb_id
         data_tests:
           - not_null

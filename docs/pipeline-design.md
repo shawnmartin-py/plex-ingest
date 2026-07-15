@@ -16,9 +16,33 @@ partitioning, frameworks, and storage is a senior/human decision. The only
 piece of this still genuinely open is the LlamaIndex/LangChain framework
 choice — see [Frameworks under consideration](#frameworks-under-consideration).
 
+## Primary key: tmdb_id — migrated from imdb_id (2026-07-15)
+
+Everything below that names `tmdb_id` as the partition key / filename stem /
+Qdrant primary key originally shipped keyed by `imdb_id`; the migration to
+TMDB ids happened 2026-07-15 (both GUIDs already flowed in via
+`raw_movies.guids`, so only the `stg_movies` extraction, key plumbing, and a
+one-off data migration — file renames plus a `stg_watch_history` rekey, see
+`scripts/migrate_ids_to_tmdb.py` — were needed; nothing was re-scraped or
+re-embedded). `imdb_id` remains a required column/metadata attribute because
+IMDb synopsis scraping and OMDb runtime lookups are only addressable by
+tt-id, and `stg_streaming_runtime` deliberately stays imdb-keyed (it caches
+an imdb-keyed API). Two operational consequences to know about:
+
+- **Every partition shows "never materialized" in the Dagster UI** after the
+  migration: materialization history lives under the old `imdb_id` partition
+  keys, which were deleted (`scripts/cleanup_old_partition_namespaces.py`).
+  This is cosmetic — all triggering is disk-state- or event-based — do NOT
+  "fix" it with a mass backfill, which would re-scrape/re-enrich the whole
+  library.
+- **The post-migration Qdrant rebuilds had to be triggered manually** (one
+  materialization each of `qdrant_collection` and
+  `watch_history_qdrant_collection`): with no new `embeddings` events under
+  the new partition keys, no automation condition had anything to react to.
+
 ## Partitioning — decided (2026-07-05)
 
-**Dynamic partitions keyed by `imdb_id`**, applied to three assets:
+**Dynamic partitions keyed by `tmdb_id`**, applied to three assets:
 `synopsis`, `enrichment`, and `embeddings`. Each asset's partition function
 generates/writes all the data for that movie in one go (`enrichment` still
 runs all 3 sections — craft/meaning/context — internally per partition,
@@ -40,7 +64,7 @@ Rejected alternatives:
 - **No partitioning** — not viable. Rejected because it would force a
   fresh full re-fetch/re-generate of all expensive LLM calls on every run;
   there'd be no way to skip movies already processed at the Dagster level.
-- **Multi-dimensional partitions (`imdb_id` × `section`, ~468 partitions)**
+- **Multi-dimensional partitions (`tmdb_id` × `section`, ~468 partitions)**
   — the per-section skip-check inside `enrichment` already gives
   equivalent granularity without fragmenting the partition grid 3x for
   little added benefit at this library size.
@@ -81,7 +105,7 @@ stages that just derive from already-fetched data get automatic
 consistency tracking, because letting a derived value go stale relative
 to its source is a correctness bug, and re-deriving it is cheap.
 
-- **`synopsis`** — no `automation_condition`; the `sync_imdb_id_partitions`
+- **`synopsis`** — no `automation_condition`; the `sync_tmdb_id_partitions`
   sensor is its sole trigger (see [Known gaps](#known-gaps-found-during-dev-subset-verification-2026-07-05)
   item 2 — `AutomationCondition.on_missing()` was originally used here but
   replaced after a cold-start bug was found in it). Never reprocessed once
@@ -124,17 +148,17 @@ upserts (see below), **no Qdrant-specific deletion logic is needed at
 all** — removal reduces entirely to file cleanup:
 
 A sensor triggered off `raw_movies`/`stg_movies` materialization diffs the
-current run's imdb_ids against the **registered dynamic partition set**
+current run's tmdb_ids against the **registered dynamic partition set**
 (not against "did stg_movies re-run" — a routine full-refresh of 156
-already-known movies must not look like new data). For each imdb_id:
+already-known movies must not look like new data). For each tmdb_id:
 - **New** → `add_dynamic_partitions`. The sensor then fills in
   `synopsis` → `enrichment` → `embeddings` for it, per the conditions above.
 - **Removed** (no longer in Plex) → `delete_dynamic_partition` (shared
   across `synopsis`/`enrichment`/`embeddings` since they use the same
   `DynamicPartitionsDefinition` instance), plus deletion of the stale
-  `synopsis/{imdb_id}.json`, `enrichment/{imdb_id}.json`, and
-  `embeddings/{imdb_id}.json` files. `delete_dynamic_partition` only
-  removes the imdb_id from the active partition set — it does not delete
+  `synopsis/{tmdb_id}.json`, `enrichment/{tmdb_id}.json`, and
+  `embeddings/{tmdb_id}.json` files. `delete_dynamic_partition` only
+  removes the tmdb_id from the active partition set — it does not delete
   historical materializations or on-disk files, so the file deletion has
   to happen explicitly. Once those files are gone, the next
   `qdrant_collection` rebuild naturally excludes that movie — there is
@@ -147,7 +171,7 @@ condition — which only reacts to tracked `embeddings` updates — had no
 reason to fire on a pure removal. Confirmed live: removing one of the
 dev-subset movies with no other movie being added in the same cycle left
 its stale points in Qdrant indefinitely. **Fix in place:**
-`sync_imdb_id_partitions` now also returns a `RunRequest` for
+`sync_tmdb_id_partitions` now also returns a `RunRequest` for
 `qdrant_collection` whenever `removed_ids` is non-empty, so a pure removal
 always triggers a rebuild directly rather than depending on an unrelated
 future `embeddings` update.
@@ -163,7 +187,7 @@ Confirmed via `git log --all -S"viewCount"`/`-S"unwatched"` across both
 repos — zero hits in this repo's history, meaning it wasn't consciously
 redesigned, just never carried over. **Fix in place:** `view_count` is now
 captured raw in `fetch_raw_movies()`/`raw_movies` (unfiltered, same split
-already used for `imdb_id`-required — see the `stg_movies.sql` comment
+already used for the both-guids-required rule — see the `stg_movies.sql` comment
 below), and `stg_movies.sql` excludes `view_count != 0` in its final
 `where`. This slots directly into the existing removal cascade above: a
 movie that gets watched between runs simply drops out of `stg_movies`,
@@ -177,8 +201,8 @@ ones going forward.
 ## Intermediate/temp storage — decided (2026-07-05)
 
 **Per-partition flat files, not DuckDB**, for the three partitioned
-stages — one JSON file per movie per stage (`synopsis/{imdb_id}.json`,
-`enrichment/{imdb_id}.json`, `embeddings/{imdb_id}.json`, the last holding
+stages — one JSON file per movie per stage (`synopsis/{tmdb_id}.json`,
+`enrichment/{tmdb_id}.json`, `embeddings/{tmdb_id}.json`, the last holding
 each section's text alongside its embedding vector), via a custom
 IOManager keyed off `context.partition_key`. DuckDB is single-writer (like
 SQLite) — if these partitions run concurrently (intended, see above),
@@ -189,15 +213,15 @@ partitioning for these stages.
 DuckDB remains exactly as already decided for `raw_movies`/`stg_movies`
 (genuinely SQL-shaped, single-writer, unpartitioned) — this only concerns
 the three new per-movie partitioned stages. `qdrant_collection` reads
-every `embeddings/{imdb_id}.json` on disk directly; it has no storage
+every `embeddings/{tmdb_id}.json` on disk directly; it has no storage
 concern of its own.
 
 ## Asset boundary — decided (2026-07-05)
 
 `raw_movies` → `stg_movies` (unpartitioned, as-is) → partition-sync sensor
-→ `synopsis` (partitioned by `imdb_id`) → `enrichment` (partitioned by
-`imdb_id`, depends on `synopsis`) → `embeddings` (partitioned by
-`imdb_id`, depends on `enrichment`) → `qdrant_collection` (**unpartitioned**,
+→ `synopsis` (partitioned by `tmdb_id`) → `enrichment` (partitioned by
+`tmdb_id`, depends on `synopsis`) → `embeddings` (partitioned by
+`tmdb_id`, depends on `enrichment`) → `qdrant_collection` (**unpartitioned**,
 depends on all partitions of `embeddings`).
 
 `qdrant_collection` is deliberately not partitioned, and does not do
@@ -214,7 +238,7 @@ the vector store immediately, interleaved per movie.
 
 ## Qdrant payload shape — decided (2026-07-05), fixed after a real gap
 
-`vector-store-contract.md` requires up to 4 points per `imdb_id` (1
+`vector-store-contract.md` requires up to 4 points per `tmdb_id` (1
 `synopsis` + up to 3 `enriched`), each carrying full catalog metadata
 (`title`/`year`/`imdb_rating`/`content_rating`/`genres`/`thumb_url`) and an
 `embedding_type` field. An initial implementation of `embeddings`/
@@ -255,7 +279,7 @@ failure returning boilerplate instead of a plot) before it reaches
 Dagster's native mechanism for this is an **asset check**
 (`@dg.asset_check`), not a new asset — `defs/checks/synopsis_match.py`'s
 `synopsis_matches_movie` attaches to `synopsis`, partitioned the same way
-(`imdb_id`). Textual heuristics alone (e.g. checking whether the synopsis
+(`tmdb_id`). Textual heuristics alone (e.g. checking whether the synopsis
 mentions the movie's own title, the way `playwright_scraper.py`'s
 `_titles_match` guards the Wikipedia page-search step) aren't enough — plot
 summaries rarely restate their own title, so that only catches gross
@@ -275,7 +299,7 @@ film without paying token cost for the whole thing on every partition.
 
 **Severity: blocking, `AssetCheckSeverity.ERROR`.** `blocking=True` means a
 run that includes `synopsis` and any of its downstream deps (`enrichment`,
-`embeddings`) — which is exactly what `sync_imdb_id_partitions` requests
+`embeddings`) — which is exactly what `sync_tmdb_id_partitions` requests
 together for a cold-start partition — halts those downstream assets if the
 check fails, rather than merely logging a warning. Bad data physically
 cannot reach Qdrant this way; a failed check requires a human to
@@ -305,7 +329,7 @@ way to (re-)verify every already-scraped `synopsis` partition without
 re-scraping is `dg.AssetSelection.checks_for_assets(synopsis)` in a
 `define_asset_job`, then `dg launch --job ... --partition <id>` per
 partition (or `dagster job backfill --all`). This fails with `CheckError:
-Job has no PartitionsDefinition`, even when `partitions_def=imdb_id_partitions`
+Job has no PartitionsDefinition`, even when `partitions_def=tmdb_id_partitions`
 is passed explicitly to `define_asset_job` — confirmed empirically that the
 explicit value doesn't survive `Definitions` resolution
 (`Definitions.get_job_def(...).partitions_def` comes back `None`) when the
@@ -359,7 +383,7 @@ not a data problem:
   needs replacing regardless.
 
 **Decision: disable the check in production, keep all the code.**
-`sync_imdb_id_partitions` now passes `asset_check_keys=[]` on every
+`sync_tmdb_id_partitions` now passes `asset_check_keys=[]` on every
 `RunRequest` (see that sensor's docstring/comment), so `synopsis_matches_movie`
 never actually executes — `synopsis`/`enrichment`/`embeddings` run exactly
 as if the check didn't exist. Nothing under `defs/checks/`,
@@ -398,12 +422,12 @@ architecture. All three were fixed 2026-07-05/2026-07-06; the day-to-day
 symptoms and debugging steps for each now live in `CLAUDE.md`'s
 "Environment gotchas" — summarized here for the design rationale:
 
-1. **Neither sensor ran by default.** `sync_imdb_id_partitions` had no
+1. **Neither sensor ran by default.** `sync_tmdb_id_partitions` had no
    `default_status=dg.DefaultSensorStatus.RUNNING`, and Dagster's
    auto-generated automation-condition sensor (which drives every
    `on_missing()`/`eager()` condition in this pipeline) also defaulted to
    `STOPPED`. Fixed by setting `default_status=RUNNING` on both, defined
-   explicitly in `sync_imdb_id_partitions.py`'s `defs` assembly.
+   explicitly in `sync_tmdb_id_partitions.py`'s `defs` assembly.
 
 2. **`on_missing()`'s cold-start blind spot**, confirmed deterministically
    via `tests/integration/test_automation_condition_cold_start.py`. The
@@ -423,7 +447,7 @@ symptoms and debugging steps for each now live in `CLAUDE.md`'s
    *after* evaluation_id 0 are unaffected.
 
    **Fix:** `synopsis` and `enrichment` no longer carry any
-   `automation_condition` at all — `sync_imdb_id_partitions` is their sole
+   `automation_condition` at all — `sync_tmdb_id_partitions` is their sole
    trigger. On every tick, for every currently-desired partition, it checks
    on-disk file presence directly (`_missing_stage_assets`) and issues a
    `RunRequest` for whatever's missing, sidestepping the
@@ -435,7 +459,7 @@ symptoms and debugging steps for each now live in `CLAUDE.md`'s
 
    **Correction, found and fixed 2026-07-14.** An earlier version of this
    fix reasoned that `embeddings`'s cold start needed the same direct-sensor
-   treatment, so `sync_imdb_id_partitions` also requested a
+   treatment, so `sync_tmdb_id_partitions` also requested a
    `qdrant_collection` rebuild directly whenever a partition's `embeddings`
    needed backfilling. That conflated two different meanings of "cold
    start": the `evaluation_id == 0` bug above is a one-time historical
@@ -552,11 +576,11 @@ summary is enough.
 
 New Qdrant collection `watch_history` (schema: `docs/vector-store-contract.md`
 in both repos), kept separate from `media_items`. Implemented as
-`defs/partitions.py`'s `watch_history_imdb_id_partitions`,
+`defs/partitions.py`'s `watch_history_tmdb_id_partitions`,
 `defs/sensors/sync_watch_history_partitions.py`,
 `defs/assets/stg_watch_history.py`, `defs/assets/watch_history_embeddings.py`,
 and `defs/assets/watch_history_qdrant_collection.py` — deliberately mirrors
-the existing `imdb_id_partitions` / `sync_imdb_id_partitions` /
+the existing `tmdb_id_partitions` / `sync_tmdb_id_partitions` /
 `qdrant_collection` pattern, reusing the existing `EmbeddingsResource`/
 `gemini_embeddings` pool as-is.
 
@@ -565,7 +589,7 @@ requirements from the design conversation rather than incidental —
 worth knowing *that* they're deliberate even though the reasoning itself
 now lives in the code's own docstrings, not duplicated here:
 
-1. Partition sync is **add-only** — unlike the existing sensor, an imdb_id
+1. Partition sync is **add-only** — unlike the existing sensor, a tmdb_id
    already embedded is never re-embedded just because it later ages out of
    the fetch window (a rewatch could bring it back into relevance).
 2. The relevance window is enforced at `watch_history_qdrant_collection`
@@ -580,7 +604,7 @@ direct-trigger pattern: it requested `watch_history_qdrant_collection`
 directly whenever anything got backfilled, plus a separate
 `_qdrant_collection_needs_cold_start` check for the case where it had never
 materialized at all. Both were removed alongside the equivalent fix to
-`sync_imdb_id_partitions` (see "Known gaps," item 2's correction) — the
+`sync_tmdb_id_partitions` (see "Known gaps," item 2's correction) — the
 same reasoning applies, and more cleanly here: `any_deps_updated()` (what
 `watch_history_qdrant_collection`'s `eager()` condition reacts to) is a
 plain materialization-event read off the instance's event log, unaffected
@@ -601,7 +625,7 @@ a SQL transform of data already at rest, so it doesn't fit `stg_movies`'s
 dbt-model shape. Whether dbt takes over the transform step specifically is
 still open, but nothing is blocked on it.
 
-**Scheduling cadence — decided (2026-07-14):** both `sync_imdb_id_partitions`
+**Scheduling cadence — decided (2026-07-14):** both `sync_tmdb_id_partitions`
 and `sync_watch_history_partitions` moved from `60`/`120` seconds to a shared
 `600` seconds. Neither sensor's reactivity was actually tick-rate-bound: a
 backlog is fully queued the tick it's first noticed (Dagster's run queue
@@ -683,8 +707,9 @@ actually matches what they're for (structured extract-load).
   same interface, plus Dagster's own retry/backoff on lock contention, no
   extra dependency cost. See `src/plex_ingest/defs/resources/duckdb.py`.
 - **dbt adopted for the staging transform** (`stg_movies`) — resolving
-  `imdb_id` out of Plex's raw `guids` is genuinely SQL-shaped, and
-  `imdb_id` is the whole system's primary key, so dbt's `not_null`/`unique`
+  `tmdb_id`/`imdb_id` out of Plex's raw `guids` is genuinely SQL-shaped, and
+  `tmdb_id` is the whole system's primary key (with `imdb_id` still required
+  alongside it for IMDb scraping/OMDb), so dbt's `not_null`/`unique`
   tests are a real data-quality gate. Wired via `dagster_dbt.DbtProjectComponent`
   with automatic lineage from `raw_movies`. See
   `dbt_project/models/staging/`.

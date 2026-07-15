@@ -7,10 +7,11 @@ from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.synopsis import synopsis
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches stg_movies_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
 # hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
+    str,
     str,
     str,
     int,
@@ -27,9 +28,13 @@ CatalogRow = tuple[
 
 
 def _catalog_row(
-    imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
+    tmdb_id: str = "101",
+    imdb_id: str = "tt0001",
+    title: str = "Test Film",
+    year: int = 2020,
 ) -> CatalogRow:
     return (
+        tmdb_id,
         imdb_id,
         title,
         year,
@@ -57,7 +62,7 @@ def test_returns_scraped_text(mocker: MockerFixture) -> None:
     mock_scraper = mocker.MagicMock()
     mock_scraper.fetch_synopsis.return_value = "A great film."
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = synopsis(context, mock_scraper, mock_duckdb)
 
     assert result == "A great film."
@@ -68,18 +73,25 @@ def test_returns_none_when_scraper_finds_nothing(mocker: MockerFixture) -> None:
     mock_scraper = mocker.MagicMock()
     mock_scraper.fetch_synopsis.return_value = None
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = synopsis(context, mock_scraper, mock_duckdb)
 
     assert result is None
 
 
-def test_scraper_called_with_catalog_title_and_year(mocker: MockerFixture) -> None:
-    mock_duckdb = _mock_duckdb(mocker, _catalog_row(title="My Film", year=1999))
+def test_scraper_called_with_looked_up_imdb_id_and_catalog_title_and_year(
+    mocker: MockerFixture,
+) -> None:
+    """The partition key is the tmdb_id, but IMDb pages are only addressable by
+    tt-id — the scraper must receive the imdb_id from the movie's stg_movies row,
+    never the partition key itself."""
+    mock_duckdb = _mock_duckdb(
+        mocker, _catalog_row(imdb_id="tt0001", title="My Film", year=1999)
+    )
     mock_scraper = mocker.MagicMock()
     mock_scraper.fetch_synopsis.return_value = "text"
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     synopsis(context, mock_scraper, mock_duckdb)
 
     mock_scraper.fetch_synopsis.assert_called_once_with("tt0001", "My Film", 1999)
@@ -89,6 +101,6 @@ def test_raises_when_no_stg_movies_row(mocker: MockerFixture) -> None:
     mock_duckdb = _mock_duckdb(mocker, None)
     mock_scraper = mocker.MagicMock()
 
-    context = dg.build_asset_context(partition_key="tt9999")
-    with pytest.raises(ValueError, match="tt9999"):
+    context = dg.build_asset_context(partition_key="9999")
+    with pytest.raises(ValueError, match="9999"):
         synopsis(context, mock_scraper, mock_duckdb)

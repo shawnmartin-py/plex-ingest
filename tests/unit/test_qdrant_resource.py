@@ -20,7 +20,7 @@ def test_recreate_collection_delegates_to_adapter(mocker: MockerFixture) -> None
 
 def test_upsert_points_delegates_to_adapter(mocker: MockerFixture) -> None:
     resource, mock_adapter = _resource(mocker)
-    points = [("id1", [0.1], "text", {"imdb_id": "tt0001"})]
+    points = [("id1", [0.1], "text", {"tmdb_id": "101", "imdb_id": "tt0001"})]
     resource.upsert_points(points)
     mock_adapter.upsert_points.assert_called_once_with(points)
 

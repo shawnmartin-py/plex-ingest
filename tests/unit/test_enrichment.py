@@ -8,10 +8,11 @@ from pytest_mock import MockerFixture
 from plex_ingest.defs.assets.enrichment import enrichment
 from plex_ingest.lib.adapters.gemini_enrichment import DailyQuotaExhaustedError
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches stg_movies_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
 # hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
+    str,
     str,
     str,
     int,
@@ -28,9 +29,13 @@ CatalogRow = tuple[
 
 
 def _catalog_row(
-    imdb_id: str = "tt0001", title: str = "Test Film", year: int = 2020
+    tmdb_id: str = "101",
+    imdb_id: str = "tt0001",
+    title: str = "Test Film",
+    year: int = 2020,
 ) -> CatalogRow:
     return (
+        tmdb_id,
         imdb_id,
         title,
         year,
@@ -66,8 +71,8 @@ def test_raises_when_synopsis_is_missing(mocker: MockerFixture) -> None:
     mock_duckdb = _mock_duckdb(mocker, _catalog_row())
     mock_llm = _mock_enrichment_llm(mocker, ("craft",), {"craft": "text"})
 
-    context = dg.build_asset_context(partition_key="tt0001")
-    with pytest.raises(ValueError, match="tt0001"):
+    context = dg.build_asset_context(partition_key="101")
+    with pytest.raises(ValueError, match="101"):
         enrichment(context, None, mock_llm, mock_duckdb)
 
 
@@ -79,7 +84,7 @@ def test_builds_dict_with_every_section(mocker: MockerFixture) -> None:
         {"craft": "Craft text.", "meaning": "Meaning text."},
     )
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = enrichment(context, "A great film.", mock_llm, mock_duckdb)
 
     assert result == {"craft": "Craft text.", "meaning": "Meaning text."}
@@ -91,7 +96,7 @@ def test_omits_section_blocked_by_llm(mocker: MockerFixture) -> None:
         mocker, ("craft", "meaning"), {"craft": "Craft text.", "meaning": None}
     )
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = enrichment(context, "A great film.", mock_llm, mock_duckdb)
 
     assert result == {"craft": "Craft text."}
@@ -103,7 +108,7 @@ def test_generate_section_called_with_catalog_and_synopsis(
     mock_duckdb = _mock_duckdb(mocker, _catalog_row(title="My Film", year=1999))
     mock_llm = _mock_enrichment_llm(mocker, ("craft",), {"craft": "text"})
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     enrichment(context, "A great film.", mock_llm, mock_duckdb)
 
     mock_llm.generate_section.assert_called_once_with(
@@ -121,8 +126,8 @@ def test_raises_when_no_stg_movies_row(mocker: MockerFixture) -> None:
     mock_duckdb = _mock_duckdb(mocker, None)
     mock_llm = _mock_enrichment_llm(mocker, ("craft",), {"craft": "text"})
 
-    context = dg.build_asset_context(partition_key="tt9999")
-    with pytest.raises(ValueError, match="tt9999"):
+    context = dg.build_asset_context(partition_key="9999")
+    with pytest.raises(ValueError, match="9999"):
         enrichment(context, "A great film.", mock_llm, mock_duckdb)
 
 
@@ -137,6 +142,6 @@ def test_daily_quota_exhausted_propagates_and_is_logged(
     mock_llm.sections = ("craft",)
     mock_llm.generate_section.side_effect = DailyQuotaExhaustedError("quota gone")
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     with pytest.raises(DailyQuotaExhaustedError, match="quota gone"):
         enrichment(context, "A great film.", mock_llm, mock_duckdb)

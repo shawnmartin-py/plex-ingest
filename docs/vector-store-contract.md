@@ -64,7 +64,8 @@ is the only cross-repo data dependency.
 
 | Field | Type | Notes |
 |---|---|---|
-| `imdb_id` | string | Primary key across both repos |
+| `tmdb_id` | string | **Primary key across both repos** — the numeric TMDB id as a string (e.g. `"603"`, from the movie's `tmdb://` Plex guid). On the ingest side it is also the Dagster partition key, the on-disk filename stem (`data/*/{tmdb_id}.json`), and the point-ID derivation input. Never an int on the wire. |
+| `imdb_id` | string | IMDb id (`tt`-prefixed) — a plain metadata attribute since the 2026-07 tmdb_id migration, no longer the primary key. Still structurally required upstream (IMDb synopsis scraping and OMDb runtime lookups only accept tt-ids) and used by `plex-rag` for IMDb links, so every movie carries both ids. |
 | `type` | string | `movie` (currently the only type synced) |
 | `title` | string | |
 | `year` | int | |
@@ -87,7 +88,7 @@ is the only cross-repo data dependency.
 | `synopsis` | `"Title: {title}\nYear: {year}\nIMDb Rating: {imdb_rating}\nGenres: {genres}\nSynopsis: {synopsis}"` — full synopsis text lives here, not in `metadata` |
 | `enriched` | The raw LLM-generated profile prose for that `section` |
 
-One `imdb_id` produces up to 4 points total: one `synopsis` point plus up to
+One `tmdb_id` produces up to 4 points total: one `synopsis` point plus up to
 three `enriched` points (one per section). Retrievers filter by
 `metadata.embedding_type` (and `metadata.section` where relevant) via
 Qdrant `Filter`/`FieldCondition`.
@@ -108,19 +109,20 @@ and a different source (watch history, not the unwatched catalog).
 - **Embedding model:** same as `media_items` — `gemini-embedding-001`, 3072
   dimensions, cosine distance.
 - **Payload shape:** same `QdrantVectorStore` defaults
-  (`page_content` + `metadata`). Only one point type per `imdb_id` — no
+  (`page_content` + `metadata`). Only one point type per `tmdb_id` — no
   `embedding_type`/`section` split needed, unlike `media_items`.
 
 ### `metadata` fields
 
 | Field | Type | Notes |
 |---|---|---|
-| `imdb_id` | string | Primary key, same meaning as in `media_items` |
+| `tmdb_id` | string | Primary key, same meaning as in `media_items` |
+| `imdb_id` | string | Metadata attribute, same meaning as in `media_items` |
 | `title` | string | |
 | `year` | int | |
 | `imdb_rating` | float | Extracted from Plex's `Rating` list, filtered to the entry whose `image` starts with `imdb://` — same extraction `media_items` already does |
 | `genres` | string | comma-joined, same convention as `media_items` |
-| `last_viewed_at` | string | ISO 8601 (`datetime.isoformat()`), naive/no tzinfo — matches Plex's own local-server timestamps. The most recent `viewedAt` for this `imdb_id`; Plex history can contain repeat watches, this collection dedupes to one point per `imdb_id`, keeping the max |
+| `last_viewed_at` | string | ISO 8601 (`datetime.isoformat()`), naive/no tzinfo — matches Plex's own local-server timestamps. The most recent `viewedAt` for this `tmdb_id`; Plex history can contain repeat watches, this collection dedupes to one point per `tmdb_id`, keeping the max |
 
 ### `page_content`
 
@@ -138,6 +140,16 @@ summary here (rather than a full scraped synopsis) tested as sufficient
 embedding input. `summary` itself is not stored as a separate metadata
 field, only embedded in `page_content` — consistent with how `media_items`
 stores full synopsis text only in `page_content`, not `metadata`.
+
+## Migration note (2026-07-15): imdb_id -> tmdb_id primary key
+
+The primary key across both repos switched from `imdb_id` to `tmdb_id`.
+Point IDs are deterministic UUIDv5s whose input string embeds the primary
+key, so every point ID changed in that migration — safe because both
+collections are full delete+rebuild on every write (`recreate_collection`),
+and executed as one full rebuild per collection at cutover. `imdb_id`
+remains in every payload as a plain attribute, which is what made the
+cutover non-breaking for a `plex-rag` deployed against the old contract.
 
 ## Non-contract items (intentionally NOT synced)
 

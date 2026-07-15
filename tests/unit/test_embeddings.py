@@ -7,10 +7,11 @@ from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.embeddings import embeddings
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches stg_movies_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
 # hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
+    str,
     str,
     str,
     int,
@@ -37,6 +38,7 @@ def _catalog_row(
     genres: list[str] | None = None, imdb_rating: float = 7.5
 ) -> CatalogRow:
     return (
+        "101",
         "tt0001",
         "Test Film",
         2020,
@@ -64,7 +66,7 @@ def test_embeds_synopsis_document_and_every_enrichment_section(
     mock_duckdb = _mock_duckdb(mocker, _catalog_row())
     mock_embeddings = _mock_embeddings(mocker)
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = cast(
         "dict[str, dict[str, object]]",
         embeddings(
@@ -83,7 +85,7 @@ def test_synopsis_document_text_matches_contract_format(mocker: MockerFixture) -
     mock_duckdb = _mock_duckdb(mocker, _catalog_row(genres=["Drama", "Sci-Fi"]))
     mock_embeddings = _mock_embeddings(mocker)
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = cast(
         "dict[str, dict[str, object]]",
         embeddings(context, "A great film.", {}, mock_embeddings, mock_duckdb),
@@ -99,7 +101,7 @@ def test_enrichment_section_text_is_embedded_unchanged(mocker: MockerFixture) ->
     mock_duckdb = _mock_duckdb(mocker, _catalog_row())
     mock_embeddings = _mock_embeddings(mocker)
 
-    context = dg.build_asset_context(partition_key="tt0001")
+    context = dg.build_asset_context(partition_key="101")
     result = cast(
         "dict[str, dict[str, object]]",
         embeddings(
@@ -118,8 +120,8 @@ def test_raises_when_synopsis_is_missing(mocker: MockerFixture) -> None:
     mock_duckdb = _mock_duckdb(mocker, _catalog_row())
     mock_embeddings = _mock_embeddings(mocker)
 
-    context = dg.build_asset_context(partition_key="tt0001")
-    with pytest.raises(ValueError, match="tt0001"):
+    context = dg.build_asset_context(partition_key="101")
+    with pytest.raises(ValueError, match="101"):
         embeddings(context, None, {"craft": "text"}, mock_embeddings, mock_duckdb)
 
 
@@ -127,6 +129,6 @@ def test_raises_when_no_stg_movies_row(mocker: MockerFixture) -> None:
     mock_duckdb = _mock_duckdb(mocker, None)
     mock_embeddings = _mock_embeddings(mocker)
 
-    context = dg.build_asset_context(partition_key="tt9999")
-    with pytest.raises(ValueError, match="tt9999"):
+    context = dg.build_asset_context(partition_key="9999")
+    with pytest.raises(ValueError, match="9999"):
         embeddings(context, "synopsis", {}, mock_embeddings, mock_duckdb)

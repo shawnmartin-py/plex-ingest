@@ -14,16 +14,17 @@ from plex_ingest.defs.assets.watch_history_qdrant_collection import (
 
 _NOW = datetime.now(UTC).replace(tzinfo=None)
 
-# Matches watch_history_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches watch_history_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, summary, last_viewed_at.
-WatchHistoryDbRow = tuple[str, str, int, list[str], float | None, str, datetime]
+WatchHistoryDbRow = tuple[str, str, str, int, list[str], float | None, str, datetime]
 
 
 def _watch_history_row(
-    imdb_id: str, title: str = "Test Film", days_ago: int = 1
+    tmdb_id: str, title: str = "Test Film", days_ago: int = 1
 ) -> WatchHistoryDbRow:
     return (
-        imdb_id,
+        tmdb_id,
+        "tt0001",
         title,
         2020,
         ["Drama"],
@@ -41,10 +42,10 @@ def _mock_duckdb(mocker: MockerFixture, rows: list[WatchHistoryDbRow]) -> MagicM
 
 
 def _write_embeddings_fixture(
-    embeddings_dir: Path, imdb_id: str, text: str = "text"
+    embeddings_dir: Path, tmdb_id: str, text: str = "text"
 ) -> None:
     embeddings_dir.mkdir(parents=True, exist_ok=True)
-    (embeddings_dir / f"{imdb_id}.json").write_text(
+    (embeddings_dir / f"{tmdb_id}.json").write_text(
         json.dumps({"text": text, "vector": [0.1, 0.2]})
     )
 
@@ -56,12 +57,12 @@ def test_rebuilds_from_embeddings_within_window(
 
     mocker.patch.object(module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings" / "watch_history"
-    _write_embeddings_fixture(embeddings_dir, "tt0001")
+    _write_embeddings_fixture(embeddings_dir, "101")
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "watch_history"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("tt0001", days_ago=1)])
+    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("101", days_ago=1)])
 
     watch_history_qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -80,35 +81,35 @@ def test_excludes_embedding_for_a_movie_aged_out_of_window_without_raising(
 
     mocker.patch.object(module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings" / "watch_history"
-    _write_embeddings_fixture(embeddings_dir, "tt0001")
+    _write_embeddings_fixture(embeddings_dir, "101")
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "watch_history"
     mock_qdrant.point_count.return_value = 0
     # Row exists but is 90 days old -- outside the 60-day relevance window.
-    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("tt0001", days_ago=90)])
+    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("101", days_ago=90)])
 
     watch_history_qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
     mock_qdrant.upsert_points.assert_not_called()
-    assert (embeddings_dir / "tt0001.json").exists()
+    assert (embeddings_dir / "101.json").exists()
 
 
 def test_raises_when_embeddings_file_has_no_matching_row_at_all(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """Distinct from aging out: no row for this imdb_id in stg_watch_history at all
+    """Distinct from aging out: no row for this tmdb_id in stg_watch_history at all
     means partition sync is genuinely out of date -- still a real bug, still raised."""
     import plex_ingest.defs.assets.watch_history_qdrant_collection as module
 
     mocker.patch.object(module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings" / "watch_history"
-    _write_embeddings_fixture(embeddings_dir, "tt0001")
+    _write_embeddings_fixture(embeddings_dir, "101")
 
     mock_qdrant = mocker.MagicMock()
     mock_duckdb = _mock_duckdb(mocker, [])  # no rows at all
 
-    with pytest.raises(ValueError, match="tt0001"):
+    with pytest.raises(ValueError, match="101"):
         watch_history_qdrant_collection(
             dg.build_asset_context(), mock_qdrant, mock_duckdb
         )
@@ -121,19 +122,20 @@ def test_point_metadata_has_no_embedding_type_or_section(
 
     mocker.patch.object(module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings" / "watch_history"
-    _write_embeddings_fixture(embeddings_dir, "tt0001")
+    _write_embeddings_fixture(embeddings_dir, "101")
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "watch_history"
     mock_qdrant.point_count.return_value = 1
     mock_duckdb = _mock_duckdb(
-        mocker, [_watch_history_row("tt0001", title="My Film", days_ago=1)]
+        mocker, [_watch_history_row("101", title="My Film", days_ago=1)]
     )
 
     watch_history_qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
     (points,), _ = mock_qdrant.upsert_points.call_args
     metadata = points[0][3]
+    assert metadata["tmdb_id"] == "101"
     assert metadata["imdb_id"] == "tt0001"
     assert metadata["title"] == "My Film"
     assert metadata["year"] == 2020
@@ -151,12 +153,12 @@ def test_point_ids_are_stable_across_rebuilds(
 
     mocker.patch.object(module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings" / "watch_history"
-    _write_embeddings_fixture(embeddings_dir, "tt0001")
+    _write_embeddings_fixture(embeddings_dir, "101")
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "watch_history"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("tt0001", days_ago=1)])
+    mock_duckdb = _mock_duckdb(mocker, [_watch_history_row("101", days_ago=1)])
 
     watch_history_qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
     (first_points,), _ = mock_qdrant.upsert_points.call_args

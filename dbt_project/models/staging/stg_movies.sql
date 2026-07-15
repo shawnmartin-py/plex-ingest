@@ -17,6 +17,7 @@ resolved as (
         duration_ms,
         hdr_formats,
         synced_at,
+        list_filter(guids, g -> g like 'tmdb://%')[1] as tmdb_guid,
         list_filter(guids, g -> g like 'imdb://%')[1] as imdb_guid,
         -- Streaming-platform placeholder clips are ~4s stand-ins named
         -- "Title - Year - (Platform).ext" (see docs/vector-store-contract.md). The
@@ -35,6 +36,7 @@ resolved as (
 )
 
 select
+    regexp_extract(tmdb_guid, 'tmdb://(.*)', 1) as tmdb_id,
     regexp_extract(imdb_guid, 'imdb://(.*)', 1) as imdb_id,
     rating_key,
     title,
@@ -63,11 +65,14 @@ select
     end as runtime_minutes,
     synced_at
 from resolved
--- Raw layer keeps every Plex item, including watched ones and ones with no IMDb guid;
--- staging is where we apply the business rules that only unwatched movies and a
--- resolved imdb_id are required downstream. A movie that gets watched between runs
--- drops out here, which the existing partition-removal cascade (see
--- docs/pipeline-design.md, "Deletion / pruning cascade") then prunes from Qdrant same
--- as any other movie no longer present in Plex.
-where imdb_guid is not null
+-- Raw layer keeps every Plex item, including watched ones and ones missing guids;
+-- staging is where we apply the business rules that only unwatched movies with both
+-- guids resolved are required downstream: tmdb_id is the pipeline's primary key
+-- (partitions, filenames, Qdrant point IDs), and imdb_id is still structurally
+-- required by IMDb synopsis scraping and OMDb runtime lookups. A movie that gets
+-- watched between runs drops out here, which the existing partition-removal cascade
+-- (see docs/pipeline-design.md, "Deletion / pruning cascade") then prunes from Qdrant
+-- same as any other movie no longer present in Plex.
+where tmdb_guid is not null
+    and imdb_guid is not null
     and view_count = 0
