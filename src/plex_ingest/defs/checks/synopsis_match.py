@@ -20,7 +20,7 @@ from plex_ingest.lib.stg_movies_reader import fetch_movie
         "against a mismatched synopsis in the same run, so bad data can't burn a "
         "paid Gemini call or reach Qdrant (and therefore the recommender) before a "
         "human resolves it.\n\n"
-        "DISABLED as of 2026-07-06: `sync_imdb_id_partitions` now passes "
+        "DISABLED as of 2026-07-06: `sync_tmdb_id_partitions` now passes "
         "asset_check_keys=[] on every RunRequest, so this never actually executes in "
         "production. A full-catalog verification run "
         "(scripts/verify_synopsis_matches.py) showed the Groq/qwen3-32b judge is "
@@ -40,7 +40,7 @@ def synopsis_matches_movie(
     synopsis_judge: SynopsisJudgeResource,
     duckdb: DuckDBResource,
 ) -> dg.AssetCheckResult:
-    imdb_id = context.partition_key
+    tmdb_id = context.partition_key
 
     if not synopsis:
         return dg.AssetCheckResult(
@@ -52,11 +52,11 @@ def synopsis_matches_movie(
         )
 
     with duckdb.get_connection() as conn:
-        movie = fetch_movie(conn, imdb_id)
+        movie = fetch_movie(conn, tmdb_id)
 
     result = synopsis_judge.check(title=movie.title, year=movie.year, synopsis=synopsis)
     context.log.info(
-        f"{movie.title} ({imdb_id}): synopsis "
+        f"{movie.title} ({tmdb_id}): synopsis "
         f"{'matches' if result.matches else 'MISMATCH'} -- {result.reason}"
     )
     return dg.AssetCheckResult(

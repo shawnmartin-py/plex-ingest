@@ -19,9 +19,10 @@ class PlexWatchHistory:
     match against candidates (title collisions across years/remakes are
     common) — see docs/pipeline-design.md, "Watch-history data availability"
     for how this was verified against the real server. Returns `None` on no
-    exact-date match or no `imdb://` guid on the match, rather than raising —
-    a single unresolvable watch-history title should be skipped, not fail
-    the whole pipeline run.
+    exact-date match or when the match lacks either a `tmdb://` or `imdb://`
+    guid (both are required, mirroring stg_movies' business rule), rather
+    than raising — a single unresolvable watch-history title should be
+    skipped, not fail the whole pipeline run.
     """
 
     def __init__(self, base_url: str, token: str, movie_library: str) -> None:
@@ -71,6 +72,14 @@ class PlexWatchHistory:
         if match is None:
             return None
 
+        tmdb_id = next(
+            (
+                guid.id.removeprefix("tmdb://")
+                for guid in match.guids
+                if guid.id.startswith("tmdb://")
+            ),
+            None,
+        )
         imdb_id = next(
             (
                 guid.id.removeprefix("imdb://")
@@ -79,7 +88,7 @@ class PlexWatchHistory:
             ),
             None,
         )
-        if imdb_id is None:
+        if tmdb_id is None or imdb_id is None:
             return None
 
         imdb_rating = next(
@@ -92,6 +101,7 @@ class PlexWatchHistory:
         )
 
         return ResolvedWatchedMovie(
+            tmdb_id=tmdb_id,
             imdb_id=imdb_id,
             title=match.title,
             year=match.year,

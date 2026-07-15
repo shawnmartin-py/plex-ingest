@@ -17,7 +17,7 @@ DISTANCE = Distance.COSINE
 SYNOPSIS_KEY = "synopsis"
 
 # Namespace for the deterministic point IDs qdrant_collection assigns to each
-# (imdb_id, document key) pair — fixed forever so re-running the rebuild never changes
+# (tmdb_id, document key) pair — fixed forever so re-running the rebuild never changes
 # an existing point's ID.
 _POINT_ID_NAMESPACE = uuid.UUID("f4b2b1d0-6c0a-4a9e-9b0a-6b3c1e2f9a11")
 
@@ -42,6 +42,7 @@ def build_synopsis_document_text(
 
 
 def build_catalog_metadata(
+    tmdb_id: str,
     imdb_id: str,
     title: str,
     year: int,
@@ -68,8 +69,11 @@ def build_catalog_metadata(
     deliberately not folded into `build_synopsis_document_text`'s embedded text,
     unlike the scraped `synopsis`. `runtime_minutes` is `None` for a streaming
     placeholder movie whose OMDb lookup hasn't (yet, or ever) resolved — see
-    `stg_movies_reader.fetch_all_movies`'s COALESCE against `stg_streaming_runtime`."""
+    `stg_movies_reader.fetch_all_movies`'s COALESCE against `stg_streaming_runtime`.
+    `tmdb_id` is the primary key across both repos (see vector-store-contract.md);
+    `imdb_id` rides along as a plain metadata attribute (plex-rag's IMDb links)."""
     return {
+        "tmdb_id": tmdb_id,
         "imdb_id": imdb_id,
         "type": "movie",
         "title": title,
@@ -90,23 +94,24 @@ def build_points(
     catalog: dict[str, MovieCatalogRow], embeddings_dir: Path
 ) -> list[tuple[str, list[float], str, dict[str, object]]]:
     """Assemble the (point_id, vector, page_content, metadata) tuples for every
-    embeddings/{imdb_id}.json file on disk, joined against the stg_movies catalog.
+    embeddings/{tmdb_id}.json file on disk, joined against the stg_movies catalog.
     This *is* vector-store-contract.md's payload shape, so it lives alongside the
     other contract-shape builders rather than inline in the qdrant_collection asset —
     keeps the asset itself down to orchestration (fetch catalog, build points, call
     the resource)."""
     points: list[tuple[str, list[float], str, dict[str, object]]] = []
     for path in sorted(embeddings_dir.glob("*.json")):
-        imdb_id = path.stem
-        if imdb_id not in catalog:
+        tmdb_id = path.stem
+        if tmdb_id not in catalog:
             msg = (
-                f"embeddings/{imdb_id}.json exists but no matching stg_movies row — "
+                f"embeddings/{tmdb_id}.json exists but no matching stg_movies row — "
                 "partition sync is out of date"
             )
             raise ValueError(msg)
-        movie = catalog[imdb_id]
+        movie = catalog[tmdb_id]
         metadata_base = build_catalog_metadata(
-            imdb_id,
+            tmdb_id,
+            movie.imdb_id,
             movie.title,
             movie.year,
             movie.imdb_rating,
@@ -122,7 +127,7 @@ def build_points(
 
         documents = json.loads(path.read_text())
         for key, data in documents.items():
-            point_id = str(uuid.uuid5(_POINT_ID_NAMESPACE, f"{imdb_id}:{key}"))
+            point_id = str(uuid.uuid5(_POINT_ID_NAMESPACE, f"{tmdb_id}:{key}"))
             metadata = {
                 **metadata_base,
                 "embedding_type": "synopsis" if key == SYNOPSIS_KEY else "enriched",
@@ -134,6 +139,7 @@ def build_points(
 
 
 def build_watch_history_metadata(
+    tmdb_id: str,
     imdb_id: str,
     title: str,
     year: int,
@@ -147,6 +153,7 @@ def build_watch_history_metadata(
     media_items-specific display fields this collection has no use for), plus
     `last_viewed_at`, which media_items has no equivalent of."""
     return {
+        "tmdb_id": tmdb_id,
         "imdb_id": imdb_id,
         "title": title,
         "year": year,
@@ -162,34 +169,35 @@ def build_watch_history_points(
     in_window_ids: set[str],
 ) -> list[tuple[str, list[float], str, dict[str, object]]]:
     """Assemble the (point_id, vector, page_content, metadata) tuples for every
-    embeddings/watch_history/{imdb_id}.json file on disk whose imdb_id is in
+    embeddings/watch_history/{tmdb_id}.json file on disk whose tmdb_id is in
     `in_window_ids`, joined against `watch_history` (the *full*, unwindowed
     stg_watch_history rows — see `fetch_all_watch_history`). Simpler than
-    `build_points`: exactly one point per imdb_id here (no embedding_type/section
+    `build_points`: exactly one point per tmdb_id here (no embedding_type/section
     split — see vector-store-contract.md's `watch_history` collection section), so
     each embeddings file holds a single {"text": ..., "vector": ...} object rather
     than a dict of documents.
 
     `watch_history` and `in_window_ids` are deliberately separate: an embeddings file
     with no row in `watch_history` at all means partition sync is out of date (a real
-    bug, raised below); an embeddings file whose imdb_id has a row but isn't in
+    bug, raised below); an embeddings file whose tmdb_id has a row but isn't in
     `in_window_ids` just means it aged past the relevance window (expected, silently
     excluded, not a bug — its embedding stays cached for if a rewatch brings it back
     into the window later)."""
     points: list[tuple[str, list[float], str, dict[str, object]]] = []
     for path in sorted(embeddings_dir.glob("*.json")):
-        imdb_id = path.stem
-        if imdb_id not in watch_history:
+        tmdb_id = path.stem
+        if tmdb_id not in watch_history:
             msg = (
-                f"embeddings/watch_history/{imdb_id}.json exists but no matching "
+                f"embeddings/watch_history/{tmdb_id}.json exists but no matching "
                 "stg_watch_history row — partition sync is out of date"
             )
             raise ValueError(msg)
-        if imdb_id not in in_window_ids:
+        if tmdb_id not in in_window_ids:
             continue
-        row = watch_history[imdb_id]
+        row = watch_history[tmdb_id]
         metadata = build_watch_history_metadata(
-            imdb_id,
+            tmdb_id,
+            row.imdb_id,
             row.title,
             row.year,
             row.imdb_rating,
@@ -197,6 +205,6 @@ def build_watch_history_points(
             row.last_viewed_at,
         )
         document = json.loads(path.read_text())
-        point_id = str(uuid.uuid5(_WATCH_HISTORY_POINT_ID_NAMESPACE, imdb_id))
+        point_id = str(uuid.uuid5(_WATCH_HISTORY_POINT_ID_NAMESPACE, tmdb_id))
         points.append((point_id, document["vector"], document["text"], metadata))
     return points

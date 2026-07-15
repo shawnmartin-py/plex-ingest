@@ -65,15 +65,15 @@ from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.enrichment import enrichment as production_enrichment
 from plex_ingest.defs.assets.synopsis import synopsis as production_synopsis
-from plex_ingest.defs.partitions import imdb_id_partitions
+from plex_ingest.defs.partitions import tmdb_id_partitions
 from plex_ingest.defs.resources.enrichment_llm import EnrichmentLLMResource
 from plex_ingest.defs.resources.partition_json_io_manager import JsonPartitionIOManager
 from plex_ingest.defs.resources.scraper import ScraperResource
 
-# Matches partitions.py's DynamicPartitionsDefinition(name="imdb_id") -- used as a
-# literal here (not imdb_id_partitions.name, which types as str | None) since
+# Matches partitions.py's DynamicPartitionsDefinition(name="tmdb_id") -- used as a
+# literal here (not tmdb_id_partitions.name, which types as str | None) since
 # DynamicPartitionsDefinition.name is always set for this project's usage.
-_PARTITIONS_DEF_NAME = "imdb_id"
+_PARTITIONS_DEF_NAME = "tmdb_id"
 
 # --- Part 1: the evaluation_id == 0 mechanism, via minimal local assets ---
 
@@ -85,7 +85,7 @@ def _on_missing_chain() -> tuple[dg.AssetsDefinition, dg.AssetsDefinition]:
 
     @dg.asset(
         key="synopsis",
-        partitions_def=imdb_id_partitions,
+        partitions_def=tmdb_id_partitions,
         automation_condition=dg.AutomationCondition.on_missing(),
     )
     def _synopsis() -> str:
@@ -93,7 +93,7 @@ def _on_missing_chain() -> tuple[dg.AssetsDefinition, dg.AssetsDefinition]:
 
     @dg.asset(
         key="enrichment",
-        partitions_def=imdb_id_partitions,
+        partitions_def=tmdb_id_partitions,
         automation_condition=dg.AutomationCondition.on_missing(),
     )
     def _enrichment(synopsis: str) -> str:
@@ -107,9 +107,9 @@ def test_partition_missing_at_evaluation_id_zero_never_requested() -> None:
     evaluation (evaluation_id 0) never gets requested -- not on that tick, and not on
     any later tick even with the cursor correctly threaded through and its dependency
     resolved in between. This is the confirmed root cause behind bug #2."""
-    imdb_id = "tt_stuck"
+    tmdb_id = "900001"
     instance = dg.DagsterInstance.ephemeral()
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [imdb_id])
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [tmdb_id])
     synopsis, enrichment = _on_missing_chain()
     defs = dg.Definitions(assets=[synopsis, enrichment])
 
@@ -119,7 +119,7 @@ def test_partition_missing_at_evaluation_id_zero_never_requested() -> None:
     # Materialize synopsis by hand (a real run launcher would do this independent of
     # the automation sensor loop) -- its dependency is no longer missing.
     synopsis_result = dg.materialize(
-        [synopsis], instance=instance, partition_key=imdb_id
+        [synopsis], instance=instance, partition_key=tmdb_id
     )
     assert synopsis_result.success
 
@@ -145,30 +145,31 @@ def test_partition_added_after_first_tick_gets_requested_normally() -> None:
     # for subsequent ticks.
     tick0 = dg.evaluate_automation_conditions(defs=defs, instance=instance)
 
-    imdb_id = "tt_added_later"
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [imdb_id])
+    tmdb_id = "900002"
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [tmdb_id])
     tick1 = dg.evaluate_automation_conditions(
         defs=defs, instance=instance, cursor=tick0.cursor
     )
-    assert tick1.get_requested_partitions(dg.AssetKey("synopsis")) == {imdb_id}
+    assert tick1.get_requested_partitions(dg.AssetKey("synopsis")) == {tmdb_id}
     # enrichment is requested on the *same* tick, not blocked: any_deps_missing() only
     # counts a dep as blocking if it *won't* be requested this tick (run grouping, see
     # any_deps_missing() == any_deps_match(missing() & ~will_be_requested())) -- since
     # synopsis will_be_requested() this tick, it doesn't count against enrichment.
-    assert tick1.get_requested_partitions(dg.AssetKey("enrichment")) == {imdb_id}
+    assert tick1.get_requested_partitions(dg.AssetKey("enrichment")) == {tmdb_id}
 
     result = dg.materialize(
-        [synopsis, enrichment], instance=instance, partition_key=imdb_id
+        [synopsis, enrichment], instance=instance, partition_key=tmdb_id
     )
     assert result.success
 
 
 # --- Part 2: real synopsis/enrichment assets produce genuinely fresh content ---
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches stg_movies_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
-# hdr_formats, source_platform.
+# hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
+    str,
     str,
     str,
     int,
@@ -180,12 +181,14 @@ CatalogRow = tuple[
     str | None,
     list[str],
     str | None,
+    int | None,
 ]
 
 
-def _mock_duckdb(mocker: MockerFixture, imdb_id: str) -> MagicMock:
+def _mock_duckdb(mocker: MockerFixture, tmdb_id: str) -> MagicMock:
     row: CatalogRow = (
-        imdb_id,
+        tmdb_id,
+        "tt0001",
         "Test Film",
         2020,
         ["Drama"],
@@ -195,6 +198,7 @@ def _mock_duckdb(mocker: MockerFixture, imdb_id: str) -> MagicMock:
         None,
         None,
         [],
+        None,
         None,
     )
     mock_duckdb = cast(MagicMock, mocker.MagicMock())
@@ -249,12 +253,12 @@ class _FakeEnrichmentLLMResource(EnrichmentLLMResource):
 
 
 def _production_resources(
-    mocker: MockerFixture, imdb_id: str, tmp_path_str: str
+    mocker: MockerFixture, tmdb_id: str, tmp_path_str: str
 ) -> dict[str, object]:
     return {
         "scraper": _FakeScraperResource(),
         "enrichment_llm": _FakeEnrichmentLLMResource(),
-        "duckdb": _mock_duckdb(mocker, imdb_id),
+        "duckdb": _mock_duckdb(mocker, tmdb_id),
         "synopsis_io_manager": JsonPartitionIOManager(
             base_dir=f"{tmp_path_str}/synopsis"
         ),
@@ -271,21 +275,21 @@ def test_repeated_synopsis_materializations_produce_unique_content(
     content, not silently reuse a previous run's output -- what the original live
     verification session checked for real via an injected marker string. Here, the fake
     adapter's randomized text lets the same assertion run fast and deterministically."""
-    imdb_id = "tt_unique_synopsis"
+    tmdb_id = "900003"
     instance = dg.DagsterInstance.ephemeral()
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [imdb_id])
-    resources = _production_resources(mocker, imdb_id, str(tmp_path))
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [tmdb_id])
+    resources = _production_resources(mocker, tmdb_id, str(tmp_path))
 
     first = dg.materialize(
         [production_synopsis],
         instance=instance,
-        partition_key=imdb_id,
+        partition_key=tmdb_id,
         resources=resources,
     )
     second = dg.materialize(
         [production_synopsis],
         instance=instance,
-        partition_key=imdb_id,
+        partition_key=tmdb_id,
         resources=resources,
     )
 
@@ -297,28 +301,28 @@ def test_repeated_enrichment_materializations_produce_unique_content(
 ) -> None:
     """Same as above, for `enrichment` -- covers the second real asset's compute path
     (dict of 3 sections) separately, since it's a distinct function from `synopsis`."""
-    imdb_id = "tt_unique_enrichment"
+    tmdb_id = "900004"
     instance = dg.DagsterInstance.ephemeral()
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [imdb_id])
-    resources = _production_resources(mocker, imdb_id, str(tmp_path))
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, [tmdb_id])
+    resources = _production_resources(mocker, tmdb_id, str(tmp_path))
 
     dg.materialize(
         [production_synopsis],
         instance=instance,
-        partition_key=imdb_id,
+        partition_key=tmdb_id,
         resources=resources,
     )
     first = dg.materialize(
         [production_synopsis, production_enrichment],
         instance=instance,
-        partition_key=imdb_id,
+        partition_key=tmdb_id,
         resources=resources,
         selection=[production_enrichment],
     )
     second = dg.materialize(
         [production_synopsis, production_enrichment],
         instance=instance,
-        partition_key=imdb_id,
+        partition_key=tmdb_id,
         resources=resources,
         selection=[production_enrichment],
     )

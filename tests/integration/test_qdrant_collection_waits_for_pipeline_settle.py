@@ -1,12 +1,12 @@
 """Proves the fix in qdrant_collection.py (_WAIT_FOR_PIPELINE_TO_SETTLE): the asset
 must not fire a rebuild while synopsis or enrichment -- two hops upstream, not a
-*direct* dep -- are still materializing for any imdb_id partition, even though the
+*direct* dep -- are still materializing for any tmdb_id partition, even though the
 triggering event (an embeddings update) has already happened.
 
 Before the fix, `qdrant_collection` had `deps=["embeddings"]` and plain `eager()`.
 `eager()`'s own `~any_deps_in_progress()` guard only inspects an asset's *direct* deps,
 so a synopsis (or enrichment) run in flight on some unrelated partition was invisible
-to it -- during a sync_imdb_id_partitions-driven backfill spanning many imdb_id
+to it -- during a sync_tmdb_id_partitions-driven backfill spanning many tmdb_id
 partitions at different pipeline stages, that meant a full Qdrant rebuild after every
 single embeddings partition, each one stale within moments as more partitions landed.
 `test_blocked_while_synopsis_in_progress_elsewhere` reproduces exactly that shape and
@@ -19,10 +19,10 @@ import dagster as dg
 from dagster_duckdb import DuckDBResource
 
 from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
-from plex_ingest.defs.partitions import imdb_id_partitions
+from plex_ingest.defs.partitions import tmdb_id_partitions
 from plex_ingest.defs.resources.qdrant import QdrantResource
 
-_PARTITIONS_DEF_NAME = "imdb_id"
+_PARTITIONS_DEF_NAME = "tmdb_id"
 
 # qdrant_collection is never actually materialized in these tests (only its
 # automation condition is evaluated), but Definitions still needs to resolve its
@@ -42,17 +42,17 @@ def _stand_in_upstream_assets(
     and then blocks on `release_synopsis`, letting a test hold its run in the STARTED
     state for as long as it needs to observe in-progress behavior."""
 
-    @dg.asset(key="synopsis", partitions_def=imdb_id_partitions)
+    @dg.asset(key="synopsis", partitions_def=tmdb_id_partitions)
     def synopsis() -> str:
         synopsis_started.set()
         release_synopsis.wait(timeout=5)
         return "synopsis text"
 
-    @dg.asset(key="enrichment", partitions_def=imdb_id_partitions)
+    @dg.asset(key="enrichment", partitions_def=tmdb_id_partitions)
     def enrichment() -> dict[str, str]:
         return {"craft": "craft text"}
 
-    @dg.asset(key="embeddings", partitions_def=imdb_id_partitions)
+    @dg.asset(key="embeddings", partitions_def=tmdb_id_partitions)
     def embeddings() -> dict[str, object]:
         return {"synopsis": {"text": "synopsis text", "vector": [0.0]}}
 
@@ -70,7 +70,7 @@ def test_blocked_while_synopsis_in_progress_elsewhere() -> None:
         resources=_UNUSED_RESOURCES,
     )
     instance = dg.DagsterInstance.ephemeral()
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt_ready"])
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["900010"])
 
     # A baseline tick before anything happens, purely to get past evaluation_id 0 --
     # an event and initial_evaluation() landing on that exact same first tick resolve
@@ -80,13 +80,13 @@ def test_blocked_while_synopsis_in_progress_elsewhere() -> None:
     # behavior this test is actually about.
     tick0 = dg.evaluate_automation_conditions(defs=defs, instance=instance)
 
-    # The triggering event: embeddings updates for tt_ready.
+    # The triggering event: embeddings updates for 900010.
     embeddings_result = dg.materialize(
-        [embeddings], instance=instance, partition_key="tt_ready"
+        [embeddings], instance=instance, partition_key="900010"
     )
     assert embeddings_result.success
 
-    # A synopsis run (e.g. a re-backfill) is kicked off for the same imdb_id and held
+    # A synopsis run (e.g. a re-backfill) is kicked off for the same tmdb_id and held
     # mid-flight -- simulating the sensor still driving this partition through an
     # earlier pipeline stage even though its embeddings are already fresh.
     thread = threading.Thread(
@@ -94,7 +94,7 @@ def test_blocked_while_synopsis_in_progress_elsewhere() -> None:
         kwargs={
             "assets": [synopsis],
             "instance": instance,
-            "partition_key": "tt_ready",
+            "partition_key": "900010",
         },
     )
     thread.start()
@@ -132,13 +132,13 @@ def test_requested_once_pipeline_has_settled() -> None:
         resources=_UNUSED_RESOURCES,
     )
     instance = dg.DagsterInstance.ephemeral()
-    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["tt_ready"])
+    instance.add_dynamic_partitions(_PARTITIONS_DEF_NAME, ["900010"])
 
     result = dg.evaluate_automation_conditions(defs=defs, instance=instance)
     assert result.get_num_requested(dg.AssetKey("qdrant_collection")) == 0
 
     embeddings_result = dg.materialize(
-        [embeddings], instance=instance, partition_key="tt_ready"
+        [embeddings], instance=instance, partition_key="900010"
     )
     assert embeddings_result.success
 

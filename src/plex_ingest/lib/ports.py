@@ -81,6 +81,7 @@ class WatchHistorySource(Protocol):
 
 @dataclass(frozen=True)
 class ResolvedWatchedMovie:
+    tmdb_id: str
     imdb_id: str
     title: str
     year: int

@@ -9,10 +9,11 @@ from pytest_mock import MockerFixture
 
 from plex_ingest.defs.assets.qdrant_collection import qdrant_collection
 
-# Matches stg_movies_reader._COLUMNS order: imdb_id, title, year, genres,
+# Matches stg_movies_reader._COLUMNS order: tmdb_id, imdb_id, title, year, genres,
 # imdb_rating, content_rating, description, thumb_url, video_resolution,
 # hdr_formats, source_platform, runtime_minutes.
 CatalogRow = tuple[
+    str,
     str,
     str,
     int,
@@ -29,7 +30,8 @@ CatalogRow = tuple[
 
 
 def _catalog_row(
-    imdb_id: str,
+    tmdb_id: str,
+    imdb_id: str = "tt0001",
     title: str = "Test Film",
     video_resolution: str | None = None,
     hdr_formats: list[str] | None = None,
@@ -37,6 +39,7 @@ def _catalog_row(
     runtime_minutes: int | None = 104,
 ) -> CatalogRow:
     return (
+        tmdb_id,
         imdb_id,
         title,
         2020,
@@ -60,14 +63,14 @@ def _mock_duckdb(mocker: MockerFixture, rows: list[CatalogRow]) -> MagicMock:
 
 
 def _write_embeddings_fixture(
-    embeddings_dir: Path, imdb_id: str, keys: dict[str, list[float]]
+    embeddings_dir: Path, tmdb_id: str, keys: dict[str, list[float]]
 ) -> None:
     embeddings_dir.mkdir(parents=True, exist_ok=True)
     payload = {
-        key: {"text": f"{key} text for {imdb_id}", "vector": vector}
+        key: {"text": f"{key} text for {tmdb_id}", "vector": vector}
         for key, vector in keys.items()
     }
-    (embeddings_dir / f"{imdb_id}.json").write_text(json.dumps(payload))
+    (embeddings_dir / f"{tmdb_id}.json").write_text(json.dumps(payload))
 
 
 def test_rebuilds_from_every_embeddings_file_on_disk(
@@ -78,16 +81,16 @@ def test_rebuilds_from_every_embeddings_file_on_disk(
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
     _write_embeddings_fixture(
-        embeddings_dir, "tt0001", {"synopsis": [0.0], "craft": [0.1, 0.2]}
+        embeddings_dir, "101", {"synopsis": [0.0], "craft": [0.1, 0.2]}
     )
     _write_embeddings_fixture(
-        embeddings_dir, "tt0002", {"synopsis": [0.0], "craft": [0.3], "meaning": [0.5]}
+        embeddings_dir, "102", {"synopsis": [0.0], "craft": [0.3], "meaning": [0.5]}
     )
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 5
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001"), _catalog_row("tt0002")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101"), _catalog_row("102")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -104,13 +107,13 @@ def test_synopsis_point_has_synopsis_embedding_type_and_no_section(
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
     _write_embeddings_fixture(
-        embeddings_dir, "tt0001", {"synopsis": [0.0], "craft": [0.1]}
+        embeddings_dir, "101", {"synopsis": [0.0], "craft": [0.1]}
     )
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 2
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -129,17 +132,18 @@ def test_points_carry_full_catalog_metadata(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", title="My Film")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", title="My Film")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
     (points,), _ = mock_qdrant.upsert_points.call_args
     metadata = points[0][3]
+    assert metadata["tmdb_id"] == "101"
     assert metadata["imdb_id"] == "tt0001"
     assert metadata["type"] == "movie"
     assert metadata["title"] == "My Film"
@@ -162,14 +166,14 @@ def test_points_carry_null_runtime_for_an_unresolved_streaming_placeholder(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
     mock_duckdb = _mock_duckdb(
         mocker,
-        [_catalog_row("tt0001", source_platform="Netflix", runtime_minutes=None)],
+        [_catalog_row("101", source_platform="Netflix", runtime_minutes=None)],
     )
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
@@ -187,12 +191,12 @@ def test_points_carry_video_resolution_for_a_real_download(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", video_resolution="4k")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", video_resolution="4k")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -209,12 +213,12 @@ def test_points_carry_hdr_formats_for_a_real_download(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", hdr_formats=["HDR"])])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", hdr_formats=["HDR"])])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -230,14 +234,12 @@ def test_points_carry_both_hdr_and_dv_when_both_present(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(
-        mocker, [_catalog_row("tt0001", hdr_formats=["HDR", "DV"])]
-    )
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", hdr_formats=["HDR", "DV"])])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -251,12 +253,12 @@ def test_unrecognized_hdr_format_raises(tmp_path: Path, mocker: MockerFixture) -
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", hdr_formats=["HDR10+"])])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", hdr_formats=["HDR10+"])])
 
-    with pytest.raises(ValueError, match="tt0001"):
+    with pytest.raises(ValueError, match="101"):
         qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
 
@@ -267,14 +269,12 @@ def test_points_carry_source_platform_for_a_streaming_placeholder(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(
-        mocker, [_catalog_row("tt0001", source_platform="Netflix")]
-    )
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", source_platform="Netflix")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
@@ -291,12 +291,12 @@ def test_unrecognized_video_resolution_raises(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001", video_resolution="8k")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101", video_resolution="8k")])
 
-    with pytest.raises(ValueError, match="tt0001"):
+    with pytest.raises(ValueError, match="101"):
         qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
 
@@ -307,12 +307,12 @@ def test_raises_when_embeddings_file_has_no_matching_catalog_row(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_duckdb = _mock_duckdb(mocker, [])  # no catalog rows at all
 
-    with pytest.raises(ValueError, match="tt0001"):
+    with pytest.raises(ValueError, match="101"):
         qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
 
 
@@ -323,18 +323,18 @@ def test_deleted_movie_is_absent_from_the_rebuild(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101")])
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
     (first_points,), _ = mock_qdrant.upsert_points.call_args
     assert len(first_points) == 1
 
-    # tt0001 is "removed" by deleting its embeddings file, same as the sync sensor does.
-    (embeddings_dir / "tt0001.json").unlink()
+    # 101 is "removed" by deleting its embeddings file, same as the sync sensor does.
+    (embeddings_dir / "101.json").unlink()
     mock_qdrant.reset_mock()
     mock_qdrant.point_count.return_value = 0
 
@@ -350,12 +350,12 @@ def test_point_ids_are_stable_across_rebuilds(
 
     mocker.patch.object(qdrant_collection_module, "PLEX_INGEST_DATA_DIR", str(tmp_path))
     embeddings_dir = tmp_path / "embeddings"
-    _write_embeddings_fixture(embeddings_dir, "tt0001", {"synopsis": [0.0]})
+    _write_embeddings_fixture(embeddings_dir, "101", {"synopsis": [0.0]})
 
     mock_qdrant = mocker.MagicMock()
     mock_qdrant.collection = "media_items"
     mock_qdrant.point_count.return_value = 1
-    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("tt0001")])
+    mock_duckdb = _mock_duckdb(mocker, [_catalog_row("101")])
 
     qdrant_collection(dg.build_asset_context(), mock_qdrant, mock_duckdb)
     (first_points,), _ = mock_qdrant.upsert_points.call_args

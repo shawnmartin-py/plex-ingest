@@ -59,6 +59,21 @@ while the pipeline is still prototype-stage:
   see `docs/pipeline-design.md`'s "Qdrant payload shape" for what was wrong
   and how it was fixed.)
 
+## Primary key is tmdb_id (migrated from imdb_id, 2026-07-15)
+
+Dynamic partitions, on-disk `data/*/{id}.json` filenames, Qdrant point-ID
+derivation, and the vector-store contract's primary key all use the numeric
+TMDB id (as a string, e.g. `"603"`). `imdb_id` is still a required
+`stg_movies` column and payload attribute — IMDb synopsis scraping and OMDb
+runtime lookups only accept tt-ids, and `stg_streaming_runtime` deliberately
+stays imdb-keyed. Sensor/partition-set names were renamed with the migration
+(`sync_imdb_id_partitions` → `sync_tmdb_id_partitions`, `imdb_id` →
+`tmdb_id`, `watch_history_imdb_id` → `watch_history_tmdb_id`) — gotchas
+below that mention the new names describe incidents that mostly predate the
+rename. Post-migration, the Dagster UI shows every partition as "never
+materialized" (history lives under the old keys) — cosmetic, do NOT mass
+backfill; see docs/pipeline-design.md's migration note.
+
 ## Pre-commit is enforced, not advisory
 
 The git hook is installed (`pre-commit install` has been run against this
@@ -89,7 +104,7 @@ cross-module imports within this package (PEP 561 marker).
   the project's own `.venv` is unaffected. If `dbt-core` is ever removed,
   this pin can likely be relaxed again.
 - **`DAGSTER_HOME` must be set to a persistent directory, not left unset.**
-  Dynamic partitions (`imdb_id`, shared by `synopsis`/`enrichment`/
+  Dynamic partitions (`tmdb_id`, shared by `synopsis`/`enrichment`/
   `embeddings`) and the concurrency pool limits below live in the
   instance's storage. Without it, `dg`/`dagster` CLI invocations fall back
   to an ephemeral instance, and dynamic partitions added in one process
@@ -109,16 +124,16 @@ cross-module imports within this package (PEP 561 marker).
   manual step for the container instance — `entrypoint.sh` sets all four on
   every container start. See README's "Running in Docker".
 - **The `PLEX_INGEST_PARTITION_LIMIT` dev-only safety rail was removed on
-  2026-07-06.** It used to cap how many imdb_ids `sync_imdb_id_partitions`
+  2026-07-06.** It used to cap how many ids `sync_tmdb_id_partitions`
   would ever register as partitions, regardless of library size (previously
   `3`). The pipeline has since been confirmed running against the full
   library, so the env var, the sensor code that read it, and its
   `compute_desired_ids` helper (and tests) were removed entirely rather than
-  just left unset — `sync_imdb_id_partitions` now always registers every
-  imdb_id in `stg_movies`. If you see `PLEX_INGEST_PARTITION_LIMIT`
+  just left unset — `sync_tmdb_id_partitions` now always registers every
+  tmdb_id in `stg_movies`. If you see `PLEX_INGEST_PARTITION_LIMIT`
   referenced anywhere (old docs, a stale `.env`), it's dead — the sensor no
   longer reads it.
-- **`sync_imdb_id_partitions` and `default_automation_condition_sensor` now
+- **`sync_tmdb_id_partitions` and `default_automation_condition_sensor` now
   both default to `RUNNING`** (fixed 2026-07-05 — see
   `docs/pipeline-design.md`'s "Known gaps found during dev-subset
   verification", gap #1) **on a fresh code location/instance.** A
@@ -140,7 +155,7 @@ cross-module imports within this package (PEP 561 marker).
   confirming via tick history that they were inert, not a live duplicate.
 - **A missing `run_key` on sensor `RunRequest`s causes unbounded queue
   growth, not just duplicate work — but `run_key` itself is the wrong tool
-  for deduping across ticks.** `sync_imdb_id_partitions` re-evaluates
+  for deduping across ticks.** `sync_tmdb_id_partitions` re-evaluates
   missing-asset state every tick (`minimum_interval_seconds=60`). With no
   `run_key` at all, Dagster can't dedupe a request for a partition whose
   previous request is still queued behind the throttled
@@ -198,7 +213,7 @@ cross-module imports within this package (PEP 561 marker).
   `tests/integration/test_automation_condition_cold_start.py`, and this is
   a genuine Dagster (1.13.12) behavior, not specific to this pipeline.
   **`synopsis`/`enrichment` no longer use `automation_condition` at all**
-  because of this — `sync_imdb_id_partitions` is their sole trigger,
+  because of this — `sync_tmdb_id_partitions` is their sole trigger,
   checking on-disk file presence directly every tick instead of relying on
   the cursor. Don't add `on_missing()`/`eager()` back to either asset
   without re-reading `docs/pipeline-design.md`'s "Known gaps", item 2.
@@ -230,8 +245,8 @@ cross-module imports within this package (PEP 561 marker).
   daemon toggle, not part of any asset/sensor definition or YAML config, so
   it doesn't show up in a code diff — check it directly via
   `instance { autoMaterializePaused }` (GraphQL) if `eager()`-gated assets
-  stop reacting to upstream updates. **Symptom seen:** `sync_imdb_id_partitions`
-  still added new imdb_id partitions and directly backfilled
+  stop reacting to upstream updates. **Symptom seen:** `sync_tmdb_id_partitions`
+  still added new partitions and directly backfilled
   `synopsis`/`enrichment`/`embeddings` (that path doesn't depend on the
   daemon), but `qdrant_collection` — which relies on `eager()`'s
   `any_deps_updated` cascade for its steady-state rebuilds, per the
@@ -241,7 +256,7 @@ cross-module imports within this package (PEP 561 marker).
   hours without making it into Qdrant as a result; `plex-rag check-imdb`
   was the first signal. Fixed via the `setAutoMaterializePaused(paused:
   false)` GraphQL mutation. If `check-imdb` says `false` for a movie whose
-  `embeddings/{imdb_id}.json` already exists on disk, check this flag
+  `embeddings/{tmdb_id}.json` already exists on disk, check this flag
   before assuming a new bug — compare `qdrant_collection`'s last
   materialization timestamp against the embeddings file's mtime; if the
   rebuild is older, the cascade didn't fire.

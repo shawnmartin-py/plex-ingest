@@ -63,13 +63,14 @@ Plex/Gemini/Qdrant stack.
 - `raw_movies` — full overwrite of the Plex movie library into DuckDB on
   every run (`src/plex_ingest/defs/assets/raw_movies.py`).
 - `stg_movies` — a dbt model (`dbt_project/models/staging/stg_movies.sql`)
-  that resolves `imdb_id` out of Plex's raw `guids` list and drops items
-  with no IMDb match, with `not_null`/`unique` tests on `imdb_id` and
-  `rating_key`.
-- `synopsis`, `enrichment`, `embeddings` — partitioned by `imdb_id`
+  that resolves `tmdb_id` and `imdb_id` out of Plex's raw `guids` list and
+  drops items missing either one (`tmdb_id` is the pipeline's primary key;
+  `imdb_id` is still required for IMDb scraping and OMDb lookups), with
+  `not_null`/`unique` tests on `tmdb_id`, `imdb_id`, and `rating_key`.
+- `synopsis`, `enrichment`, `embeddings` — partitioned by `tmdb_id`
   (`src/plex_ingest/defs/assets/{synopsis,enrichment,embeddings}.py`).
   `synopsis`/`enrichment` carry no `automation_condition` — the
-  `sync_imdb_id_partitions` sensor is their sole trigger, based on on-disk
+  `sync_tmdb_id_partitions` sensor is their sole trigger, based on on-disk
   file presence (see CLAUDE.md's "Environment gotchas" for why).
   `embeddings` keeps `eager()` for its steady-state cascade, and embeds the
   synopsis document *and* every enrichment section (up to 4 points per
@@ -81,7 +82,7 @@ Plex/Gemini/Qdrant stack.
   Qdrant collection from every `data/embeddings/*.json` on disk, attaching
   full catalog metadata read fresh from `stg_movies` at rebuild time
   (`src/plex_ingest/defs/assets/qdrant_collection.py`).
-- `sync_imdb_id_partitions` — sensor keeping the `imdb_id` dynamic
+- `sync_tmdb_id_partitions` — sensor keeping the `tmdb_id` dynamic
   partition set in sync with `stg_movies`, including a deletion cascade for
   movies no longer in Plex (`src/plex_ingest/defs/sensors/`).
 - `poll_plex_job` — schedule that materializes `raw_movies` → `stg_movies`
@@ -95,7 +96,7 @@ Plex/Gemini/Qdrant stack.
   (`src/plex_ingest/defs/checks/synopsis_match.py`), distinct from the
   `tests/` code tests, that verifies a scraped synopsis actually describes
   its movie rather than an unrelated one, using an LLM judge (Groq's
-  `qwen/qwen3-32b`). **Currently disabled** — `sync_imdb_id_partitions`
+  `qwen/qwen3-32b`). **Currently disabled** — `sync_tmdb_id_partitions`
   passes `asset_check_keys=[]` on every `RunRequest`, so it never actually
   runs. A full-catalog verification run showed the judge is unreliable at
   scale (~85% false-mismatch rate, including contradictory verdicts for the
@@ -116,14 +117,14 @@ A separate `watch_history` asset group, mirroring the shape of the
 pipeline above but feeding its own Qdrant collection:
 
 - `stg_watch_history` — fetches the last 60 days of Plex watch history and
-  resolves each title to an `imdb_id`/genres/rating/short summary via
+  resolves each title to a `tmdb_id`/`imdb_id`/genres/rating/short summary via
   Plex's Discover API (`src/plex_ingest/defs/assets/stg_watch_history.py`,
   using `PlexWatchHistoryResource`). Deliberately unpartitioned and
   upserts into an accumulating DuckDB table rather than overwriting, so a
   row survives after it ages out of the fetch window. Covered by the same
   `poll_plex_job` daily schedule as `raw_movies`/`stg_movies` (see above).
-- `watch_history_embeddings` — partitioned by `watch_history_imdb_id`
-  (a separate, add-only partition set from `imdb_id`); embeds one
+- `watch_history_embeddings` — partitioned by `watch_history_tmdb_id`
+  (a separate, add-only partition set from `tmdb_id`); embeds one
   synopsis-shaped document per movie, no synopsis/enrichment split
   (`src/plex_ingest/defs/assets/watch_history_embeddings.py`). Pooled at
   the same `gemini_embeddings` limit as `embeddings`.
@@ -134,10 +135,10 @@ pipeline above but feeding its own Qdrant collection:
   from the rebuild but stays cached on disk in case a rewatch brings it
   back (`src/plex_ingest/defs/assets/watch_history_qdrant_collection.py`).
 - `sync_watch_history_partitions` — sensor keeping the
-  `watch_history_imdb_id` partition set in sync with `stg_watch_history`
+  `watch_history_tmdb_id` partition set in sync with `stg_watch_history`
   and triggering both assets above on cold start
   (`src/plex_ingest/defs/sensors/sync_watch_history_partitions.py`).
-  **Add-only, unlike `sync_imdb_id_partitions`**: an `imdb_id` already
+  **Add-only, unlike `sync_tmdb_id_partitions`**: a `tmdb_id` already
   embedded here is never re-embedded or removed just because it later
   ages out of `stg_watch_history`'s fetch window — a rewatch could bring
   it back into relevance, so this pipeline guarantees each movie is only
@@ -178,7 +179,7 @@ mid-backfill — see that asset's docstring).
 checks" before trusting any output.** A full-catalog run of this script
 showed the Groq/qwen3-32b judge has a ~85% false-mismatch rate and gives
 inconsistent verdicts for the same partition across runs, which is why the
-check is disabled in production (`sync_imdb_id_partitions` passes
+check is disabled in production (`sync_tmdb_id_partitions` passes
 `asset_check_keys=[]`). The script and check code are unchanged and still
 usable for investigation, just not for real data-quality decisions yet.
 
@@ -187,7 +188,7 @@ scraped, **without re-scraping `synopsis` itself**:
 
 ```bash
 uv run python scripts/verify_synopsis_matches.py          # every partition in data/synopsis/
-uv run python scripts/verify_synopsis_matches.py tt0242888 tt0361127  # just these
+uv run python scripts/verify_synopsis_matches.py 603 27205  # just these (tmdb ids)
 ```
 
 This is a plain script, not a `dg launch`/backfill — a job selecting only
@@ -198,7 +199,7 @@ judge directly per partition and records each result as a runless
 asset-check event, so results still appear in the Dagster UI's checks
 history for `synopsis` (Assets → `synopsis` → Checks tab) exactly as if the
 check had run inside a real job. It exits non-zero (and lists the failing
-`imdb_id`s) if anything fails.
+`tmdb_id`s) if anything fails.
 
 ## Getting started
 
@@ -295,8 +296,8 @@ running `uv run dg dev` on the host:
 ## Running the pipeline end-to-end
 
 `raw_movies`, `stg_movies`, and `stg_watch_history` are the pipeline's only
-entry points — every asset downstream is partitioned per `imdb_id` (or
-`watch_history_imdb_id`), so those partitions don't exist until the
+entry points — every asset downstream is partitioned per `tmdb_id` (or
+`watch_history_tmdb_id`), so those partitions don't exist until the
 respective sensor has something to register. `poll_plex_job` (see
 "Pipeline" above) materializes all three daily at 1am UTC, so in steady
 state nothing further is needed. With `dg dev` running:
@@ -313,7 +314,7 @@ state nothing further is needed. With `dg dev` running:
    (`make seed` / `make seed-watch-history` run these too.)
 
 2. **Confirm automation is `RUNNING`**: Automation → Sensors/Schedules in
-   the UI — `sync_imdb_id_partitions`, `sync_watch_history_partitions`,
+   the UI — `sync_tmdb_id_partitions`, `sync_watch_history_partitions`,
    `default_automation_condition_sensor`, and `poll_plex_job_schedule`
    should all show `RUNNING`. These default to `RUNNING` on a fresh
    `DAGSTER_HOME`, but an instance created before the 2026-07-05 sensor fix
@@ -321,7 +322,7 @@ state nothing further is needed. With `dg dev` running:
    `default_status` won't override — toggle on manually if so.
 
 3. **Everything else is automatic.** Within one sensor tick,
-   `sync_imdb_id_partitions` (≤600s) and `sync_watch_history_partitions`
+   `sync_tmdb_id_partitions` (≤600s) and `sync_watch_history_partitions`
    (≤600s) register any new partitions and directly request whatever's
    missing on disk; `embeddings`/`watch_history_embeddings` cascade to
    `qdrant_collection`/`watch_history_qdrant_collection` via `eager()`.

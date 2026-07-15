@@ -73,8 +73,8 @@ class PlexMovieCatalog:
     def fetch_raw_movies(self) -> list[dict[str, Any]]:
         """One row per movie currently in the library, as close to Plex's own shape as
         useful. `guids` is kept as the raw `imdb://...`/`tmdb://...` list rather than
-        pre-resolving an imdb_id — that resolution is a staging-layer concern, not a raw
-        ingestion one.
+        pre-resolving a tmdb_id/imdb_id — that resolution is a staging-layer concern,
+        not a raw ingestion one.
 
         `video_resolution`/`duration_ms`/`file_path`/`hdr_formats` come from the item's
         first `Media`/`Part` (a movie library item has exactly one of each in this
@@ -89,8 +89,8 @@ class PlexMovieCatalog:
 
         `view_count` is captured raw (unfiltered) rather than excluding watched movies
         here — staging applies the unwatched-only business rule, the same split already
-        used for the imdb_id-required rule, so a movie's watched state stays visible for
-        debugging instead of the item silently never appearing anywhere."""
+        used for the both-guids-required rule, so a movie's watched state stays
+        visible for debugging instead of the item silently never appearing anywhere."""
         section = self._server().library.section(self._movie_library)
         synced_at = datetime.now(UTC)
         return [

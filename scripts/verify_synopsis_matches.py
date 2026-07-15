@@ -1,4 +1,4 @@
-"""Runs the synopsis_matches_movie data-quality check against every imdb_id that
+"""Runs the synopsis_matches_movie data-quality check against every tmdb_id that
 already has a scraped synopsis on disk, without re-materializing (re-scraping)
 `synopsis` itself.
 
@@ -17,10 +17,10 @@ the Dagster UI's checks history/health for `synopsis`, exactly as if the check h
 inside a real job.
 
 Usage:
-    uv run python scripts/verify_synopsis_matches.py [imdb_id ...]
+    uv run python scripts/verify_synopsis_matches.py [tmdb_id ...]
 
 With no arguments, verifies every partition under data/synopsis/. With one or more
-imdb_ids, verifies just those.
+tmdb_ids, verifies just those.
 """
 
 import json
@@ -43,7 +43,7 @@ def _synopsis_dir() -> Path:
     return Path(PLEX_INGEST_DATA_DIR) / "synopsis"
 
 
-def _imdb_ids_to_verify() -> list[str]:
+def _tmdb_ids_to_verify() -> list[str]:
     if len(sys.argv) > 1:
         return sys.argv[1:]
     return sorted(p.stem for p in _synopsis_dir().glob("*.json"))
@@ -71,27 +71,27 @@ def main() -> None:
     judge = SynopsisJudgeResource()
     already_recorded = _already_recorded_partitions(instance)
 
-    imdb_ids = _imdb_ids_to_verify()
+    tmdb_ids = _tmdb_ids_to_verify()
     failed: list[str] = []
     skipped = 0
 
-    for imdb_id in imdb_ids:
-        synopsis_path = _synopsis_dir() / f"{imdb_id}.json"
+    for tmdb_id in tmdb_ids:
+        synopsis_path = _synopsis_dir() / f"{tmdb_id}.json"
         synopsis = (
             json.loads(synopsis_path.read_text()) if synopsis_path.exists() else None
         )
-        movie = fetch_movie(conn, imdb_id)
+        movie = fetch_movie(conn, tmdb_id)
 
         if not synopsis:
-            print(f"{imdb_id} ({movie.title}): SKIP -- no synopsis on disk")
+            print(f"{tmdb_id} ({movie.title}): SKIP -- no synopsis on disk")
             skipped += 1
             continue
 
         result = judge.check(title=movie.title, year=movie.year, synopsis=synopsis)
         status = "PASS" if result.matches else "FAIL"
-        print(f"{imdb_id} ({movie.title}): {status} -- {result.reason}")
+        print(f"{tmdb_id} ({movie.title}): {status} -- {result.reason}")
 
-        if imdb_id in already_recorded:
+        if tmdb_id in already_recorded:
             print("  (already recorded in the check history -- not re-reporting)")
         else:
             instance.report_runless_asset_event(
@@ -101,13 +101,13 @@ def main() -> None:
                     passed=result.matches,
                     severity=dg.AssetCheckSeverity.ERROR,
                     description=result.reason,
-                    partition=imdb_id,
+                    partition=tmdb_id,
                 )
             )
         if not result.matches:
-            failed.append(imdb_id)
+            failed.append(tmdb_id)
 
-    checked = len(imdb_ids) - skipped
+    checked = len(tmdb_ids) - skipped
     print(
         f"\n{checked - len(failed)}/{checked} passed ({skipped} skipped, no synopsis)."
     )
